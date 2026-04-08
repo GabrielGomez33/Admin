@@ -1,0 +1,12 @@
+{
+  "name": "tugrr-admin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TUGRR Admin Portal - deploy both server and client",
+  "scripts": {
+    "deploy": "cd server && npm run deploy && cd ../client && npm run deploy && cd ..",
+    "deploy:server": "cd server && npm run deploy && cd ..",
+    "deploy:client": "cd client && npm run deploy && cd ..",
+    "install:all": "cd server && npm install && cd ../client && npm install && cd .."
+  }
+}
