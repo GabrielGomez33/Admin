@@ -41,7 +41,7 @@ mirrorRouter.get('/logs', (req, res) => {
 
 // GET /admin/api/mirror/workers — All mirror worker logs
 mirrorRouter.get('/workers', (_req, res) => {
-  const workers = ['analysis-worker', 'dina-chat-worker', 'truthstream-worker', 'personal-analysis-worker'];
+  const workers = ['analysis-worker', 'dina-chat-worker', 'truthstream-worker', 'personal-analysis-worker', 'email-campaign-worker'];
   const result = workers.map(name => ({
     name,
     errors: tailLog(`${name}-error.log`, 20),

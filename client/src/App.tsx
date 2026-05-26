@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import EmailPanel from './email/EmailPanel';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -256,7 +257,7 @@ function ServiceArchitecture({ health, processes }: { health: ServiceHealth[]; p
   const mirrorH = health.find(h => h.name === 'mirror-server');
   const dinaH = health.find(h => h.name === 'dina-server');
   const mirrorWorkers = processes.filter(p =>
-    ['analysis-worker', 'dina-chat-worker', 'truthstream-worker', 'personal-analysis-worker'].includes(p.name)
+    ['analysis-worker', 'dina-chat-worker', 'truthstream-worker', 'personal-analysis-worker', 'email-campaign-worker'].includes(p.name)
   );
   const onlineCount = processes.filter(p => p.status === 'online').length;
   const totalMem = processes.reduce((sum, p) => sum + p.memory, 0);
@@ -832,7 +833,7 @@ function DinaPanel() {
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'system' | 'mirror' | 'dina';
+type Tab = 'system' | 'mirror' | 'dina' | 'email';
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(!!getToken());
@@ -863,13 +864,13 @@ export default function App() {
         </div>
       </div>
       <div className="nav">
-        {(['system', 'mirror', 'dina'] as Tab[]).map(tab => (
+        {(['system', 'mirror', 'dina', 'email'] as Tab[]).map(tab => (
           <button
             key={tab}
             className={`nav-tab${activeTab === tab ? ' active' : ''}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === 'system' ? 'System Overview' : tab === 'mirror' ? 'Mirror Server' : 'DINA Server'}
+            {tab === 'system' ? 'System Overview' : tab === 'mirror' ? 'Mirror Server' : tab === 'dina' ? 'DINA Server' : 'Email'}
           </button>
         ))}
       </div>
@@ -877,6 +878,7 @@ export default function App() {
         {activeTab === 'system' && <SystemPanel />}
         {activeTab === 'mirror' && <MirrorPanel />}
         {activeTab === 'dina' && <DinaPanel />}
+        {activeTab === 'email' && <EmailPanel />}
       </div>
     </div>
   );
