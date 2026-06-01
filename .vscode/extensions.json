@@ -1,0 +1,12 @@
+{
+  // Workspace extension recommendations. VS Code prompts contributors to
+  // install these on first open. Keep the list small and high-signal.
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "mikestead.dotenv",
+    "github.vscode-github-actions",
+    "yzhang.markdown-all-in-one",
+    "redhat.vscode-yaml"
+  ],
+  "unwantedRecommendations": []
+}

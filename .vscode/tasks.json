@@ -1,0 +1,85 @@
+{
+  // Reusable VS Code tasks for the Admin Portal monorepo.
+  // Run via: Terminal > Run Task... (Cmd/Ctrl+Shift+P → "Run Task").
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "install:all",
+      "type": "shell",
+      "command": "npm run install:all",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "build:server",
+      "type": "npm",
+      "script": "build",
+      "path": "server",
+      "group": "build",
+      "presentation": { "reveal": "silent", "panel": "dedicated" },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "build:client",
+      "type": "npm",
+      "script": "build",
+      "path": "client",
+      "group": "build",
+      "presentation": { "reveal": "silent", "panel": "dedicated" },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "build:all",
+      "dependsOn": ["build:server", "build:client"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "typecheck:server",
+      "type": "shell",
+      "command": "npx tsc --noEmit",
+      "options": { "cwd": "${workspaceFolder}/server" },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "typecheck:client",
+      "type": "shell",
+      "command": "npx tsc -b --noEmit",
+      "options": { "cwd": "${workspaceFolder}/client" },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "dev:server",
+      "type": "npm",
+      "script": "dev",
+      "path": "server",
+      "isBackground": true,
+      "presentation": { "panel": "dedicated", "reveal": "always" },
+      "problemMatcher": []
+    },
+    {
+      "label": "dev:client",
+      "type": "npm",
+      "script": "dev",
+      "path": "client",
+      "isBackground": true,
+      "presentation": { "panel": "dedicated", "reveal": "always" },
+      "problemMatcher": []
+    },
+    {
+      "label": "lint:client",
+      "type": "npm",
+      "script": "lint",
+      "path": "client",
+      "group": "test",
+      "problemMatcher": ["$eslint-stylish"]
+    },
+    {
+      "label": "clean:all",
+      "type": "shell",
+      "command": "cd server && npm run clean && cd ../client && npm run clean",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

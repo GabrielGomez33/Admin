@@ -11,6 +11,7 @@ import { authRouter } from './routes/auth';
 import { mirrorRouter } from './routes/mirror';
 import { dinaRouter } from './routes/dina';
 import { systemRouter } from './routes/system';
+import { emailRouter } from './routes/email';
 import { authMiddleware } from './middleware/auth';
 
 const app = express();
@@ -25,7 +26,8 @@ app.use(cors({
   ],
   credentials: true,
 }));
-app.use(express.json());
+// Raised limit accommodates base64 email attachments routed to the email API.
+app.use(express.json({ limit: process.env.ADMIN_JSON_LIMIT || '12mb' }));
 
 // Public routes
 app.get('/admin/api/health', (_req, res) => {
@@ -37,6 +39,7 @@ app.use('/admin/api/auth', authRouter);
 app.use('/admin/api/system', authMiddleware, systemRouter);
 app.use('/admin/api/mirror', authMiddleware, mirrorRouter);
 app.use('/admin/api/dina', authMiddleware, dinaRouter);
+app.use('/admin/api/email', authMiddleware, emailRouter);
 
 // Start server
 app.listen(PORT, '127.0.0.1', () => {
