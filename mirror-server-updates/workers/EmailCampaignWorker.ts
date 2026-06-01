@@ -12,6 +12,12 @@
 // Run standalone: node dist/workers/EmailCampaignWorker.js
 // ============================================================================
 
+// Load env vars BEFORE any module that touches process.env at import time
+// (e.g. config/redis instantiates ioredis in its constructor and would connect
+// without REDIS_PASSWORD → NOAUTH). A BARE side-effect import is preserved
+// verbatim by TypeScript; a named import whose binding is never referenced
+// (`import { DB } from '../db'`) gets elided from the compiled output.
+import 'dotenv/config';
 import { Logger } from '../utils/logger';
 import { mirrorRedis } from '../config/redis';
 import { tick } from '../services/emailBroadcastService';
