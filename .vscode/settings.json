@@ -1,0 +1,40 @@
+{
+  // ── TypeScript ──────────────────────────────────────────────────────────────
+  // Use the client's TypeScript (newer) as the workspace SDK; both packages
+  // type-check fine against it.
+  "typescript.tsdk": "client/node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "typescript.preferences.importModuleSpecifier": "shortest",
+  "typescript.updateImportsOnFileMove.enabled": "always",
+
+  // ── Editor ──────────────────────────────────────────────────────────────────
+  // formatOnSave is intentionally OFF to avoid bulk reformatting of existing
+  // files. ESLint auto-fix on save handles lint-level issues only.
+  "editor.formatOnSave": false,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "files.trimFinalNewlines": true,
+
+  // ── ESLint (client only; server has no lint config) ─────────────────────────
+  "eslint.workingDirectories": [{ "directory": "client", "changeProcessCWD": true }],
+  "eslint.validate": ["javascript", "javascriptreact", "typescript", "typescriptreact"],
+
+  // ── File visibility ─────────────────────────────────────────────────────────
+  "files.exclude": {
+    "**/.tsbuildinfo": true,
+    "**/.DS_Store": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/package-lock.json": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/dist/**": true
+  }
+}
