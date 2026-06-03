@@ -1,0 +1,364 @@
+# =============================================================================
+# MIRROR FRONTEND CI/CD PIPELINE
+# =============================================================================
+# Enterprise-grade pipeline for the Mirror React SPA frontend.
+#
+# TRIGGERS:
+#   - Push to master or develop → full pipeline + deploy
+#   - Pull request to master or develop → quality gates only (no deploy)
+#   - Manual dispatch → full pipeline with optional deploy
+#
+# QUALITY GATES:
+#   1. Dependency install (deterministic via npm ci)
+#   2. ESLint code quality check
+#   3. TypeScript strict type-check (tsc -b --noEmit)
+#   4. Vite production build (generates optimized dist/)
+#   5. Bundle size analysis (prevent bloat)
+#   6. Security audit (npm audit)
+#
+# DEPLOYMENT:
+#   - Build dist/ on GitHub Actions (free compute, consistent environment)
+#   - SCP dist/ to production server at /var/www/mirror-client/dist/
+#   - NO PM2 restart needed (static files served by Apache)
+#   - Smoke test (verify /Mirror/ serves 200)
+#
+# NOTE: The GitHub repo has source in client/ subdirectory.
+#       The production server has source at /var/www/mirror-client/ (no client/ wrapper).
+#       We build on GitHub Actions and deploy the compiled dist/ to avoid this mismatch.
+# =============================================================================
+
+name: Mirror Frontend CI/CD
+
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+    branches: [master, develop]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Force deploy to production'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # ===========================================================================
+  # JOB 1: QUALITY GATES
+  # ===========================================================================
+  quality:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Expose the computed release version so the deploy job can re-use it for
+    # the git tag + GitHub Release. This keeps the version baked into the
+    # build artifact identical to the tag pushed on success.
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint check
+        run: npm run lint
+        continue-on-error: true
+
+      - name: TypeScript type-check
+        run: npx tsc -b --noEmit
+
+      - name: Compute release version
+        id: version
+        # Single source of truth for the version string. Matches the format
+        # the deploy job previously generated inline at tag time. Emitting
+        # to GITHUB_OUTPUT lets downstream steps + the deploy job consume it
+        # without recomputing (and risking drift if the date rolls over).
+        run: |
+          VERSION="v$(date -u +'%Y.%m.%d')-${GITHUB_SHA::7}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: $VERSION"
+
+      - name: Vite production build
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_PAYPAL_CLIENT_ID: ${{ secrets.VITE_PAYPAL_CLIENT_ID }}
+          VITE_PAYPAL_PLAN_ID: ${{ secrets.VITE_PAYPAL_PLAN_ID }}
+          # Surfaced to the client as import.meta.env.VITE_APP_VERSION so the
+          # GlobalDashboard's System panel can show the deployed version.
+          VITE_APP_VERSION: ${{ steps.version.outputs.version }}
+        run: npm run build
+
+      - name: Verify build output
+        run: |
+          if [ ! -f "dist/index.html" ]; then
+            echo "::error::Build failed — dist/index.html not found"
+            exit 1
+          fi
+
+          if [ ! -f "dist/.htaccess" ]; then
+            echo "::error::Build missing .htaccess — SPA routing will break"
+            exit 1
+          fi
+
+          echo "Build artifacts verified:"
+          ls -la dist/
+          echo ""
+          echo "Asset sizes:"
+          du -sh dist/assets/* 2>/dev/null || echo "No assets directory"
+          echo ""
+          TOTAL_SIZE=$(du -sh dist/ | cut -f1)
+          echo "Total bundle size: $TOTAL_SIZE"
+
+      - name: Bundle size check
+        run: |
+          TOTAL_KB=$(du -sk dist/ | cut -f1)
+          echo "Bundle size: ${TOTAL_KB}KB"
+
+          if [ "$TOTAL_KB" -gt 10240 ]; then
+            echo "::warning::Bundle size is ${TOTAL_KB}KB (>10MB). Consider code splitting."
+          elif [ "$TOTAL_KB" -gt 5120 ]; then
+            echo "::notice::Bundle size is ${TOTAL_KB}KB (>5MB). Monitor for growth."
+          else
+            echo "Bundle size is within acceptable limits."
+          fi
+
+      - name: Security audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Upload build artifact
+        if: github.ref == 'refs/heads/master' || (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true')
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-frontend-dist
+          path: client/dist/
+          retention-days: 5
+
+  # ===========================================================================
+  # JOB 2: DEPLOY TO PRODUCTION
+  # ===========================================================================
+  deploy:
+    name: Deploy to Production
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true')
+
+    environment:
+      name: production
+      url: https://www.theundergroundrailroad.world/Mirror/
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mirror-frontend-dist
+          path: dist/
+
+      - name: Verify artifact
+        run: |
+          if [ ! -f "dist/index.html" ]; then
+            echo "::error::Build artifact missing index.html"
+            exit 1
+          fi
+          echo "Artifact contents:"
+          ls -la dist/
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Backup current dist on server
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'BACKUP'
+          DIST_PATH="${{ secrets.SERVER_DIST_PATH }}"
+
+          if [ -d "$DIST_PATH" ]; then
+            rm -rf /tmp/.mirror-client-dist-backup
+            cp -r "$DIST_PATH" /tmp/.mirror-client-dist-backup
+            echo "Backup created at /tmp/.mirror-client-dist-backup"
+            echo "Backup size: $(du -sh /tmp/.mirror-client-dist-backup | cut -f1)"
+          else
+            echo "No existing dist to backup"
+          fi
+          BACKUP
+
+      - name: Deploy dist to server
+        run: |
+          echo "=========================================="
+          echo "  MIRROR FRONTEND DEPLOYMENT"
+          echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "=========================================="
+
+          DIST_PATH="${{ secrets.SERVER_DIST_PATH }}"
+
+          # Step 1: Clear old dist on server
+          echo "[1/3] Clearing old dist..."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "rm -rf $DIST_PATH/*"
+
+          # Step 2: Upload new dist via SCP
+          echo "[2/3] Uploading new build..."
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -r \
+            dist/* ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:$DIST_PATH/
+
+          # Step 3: Verify files landed
+          echo "[3/3] Verifying deployment..."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << VERIFY
+          if [ -f "$DIST_PATH/index.html" ] && [ -f "$DIST_PATH/.htaccess" ]; then
+            echo "Deploy verified:"
+            ls -la $DIST_PATH/
+            echo ""
+            echo "Bundle size: \$(du -sh $DIST_PATH/ | cut -f1)"
+          else
+            echo "ERROR: Deploy verification failed!"
+            exit 1
+          fi
+          VERIFY
+
+      - name: Smoke test
+        id: smoke_test
+        run: |
+          echo "Running smoke test..."
+          MAX_RETRIES=3
+          RETRY_INTERVAL=3
+
+          # Why --resolve + the www hostname instead of https://localhost:
+          # Apache now has TWO vhosts on :443 — the canonical app vhost
+          # (ServerName www.theundergroundrailroad.world) and the apex
+          # redirect vhost (ServerName theundergroundrailroad.world) that
+          # 301s anything bare-apex to www. The apex redirect is also the
+          # default :443 vhost (first in source order), so unknown SNI
+          # like "localhost" gets routed to it and returns 301 — which
+          # the previous smoke test interpreted as a failure.
+          #
+          # --resolve maps the canonical www hostname directly to
+          # 127.0.0.1 so the curl still stays on loopback (no public
+          # DNS round-trip) AND sends the correct SNI/Host so Apache
+          # routes to the app vhost. -k is no longer needed because the
+          # cert is valid for the www name. Plain 200 expected.
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i/$MAX_RETRIES..."
+
+            HTTP_CODE=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+              "curl -s -o /dev/null -w '%{http_code}' \
+                --resolve www.theundergroundrailroad.world:443:127.0.0.1 \
+                https://www.theundergroundrailroad.world/Mirror/" \
+              2>/dev/null || echo "000")
+
+            echo "Smoke test response: HTTP $HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "smoke_status=healthy" >> $GITHUB_OUTPUT
+              echo "Smoke test PASSED — /Mirror/ returns 200"
+              exit 0
+            fi
+
+            if [ "$i" -lt "$MAX_RETRIES" ]; then
+              echo "Retrying in ${RETRY_INTERVAL}s..."
+              sleep $RETRY_INTERVAL
+            fi
+          done
+
+          echo "smoke_status=unhealthy" >> $GITHUB_OUTPUT
+          echo "::error::Smoke test FAILED — /Mirror/ not responding"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure() && steps.smoke_test.outputs.smoke_status == 'unhealthy'
+        run: |
+          echo "::error::DEPLOYING ROLLBACK..."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ROLLBACK'
+          DIST_PATH="${{ secrets.SERVER_DIST_PATH }}"
+
+          if [ -d "/tmp/.mirror-client-dist-backup" ]; then
+            echo "Restoring dist from backup..."
+            rm -rf "$DIST_PATH"
+            cp -r /tmp/.mirror-client-dist-backup "$DIST_PATH"
+            echo "Rollback complete."
+            ls -la "$DIST_PATH/"
+          else
+            echo "ERROR: No backup found! Manual intervention required."
+            exit 1
+          fi
+          ROLLBACK
+
+      - name: Tag release
+        if: success()
+        # Reuses the version computed in the quality job so the tag matches
+        # the VITE_APP_VERSION baked into the build artifact.
+        env:
+          VERSION: ${{ needs.quality.outputs.version }}
+        run: |
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          echo "Tagged release: $VERSION"
+
+      - name: Create GitHub Release
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          VERSION: ${{ needs.quality.outputs.version }}
+        with:
+          script: |
+            const version = process.env.VERSION;
+            const commits = await github.rest.repos.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 10
+            });
+            const changelog = commits.data
+              .slice(0, 5)
+              .map(c => `- ${c.commit.message.split('\n')[0]}`)
+              .join('\n');
+
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: version,
+              name: `Mirror Frontend ${version}`,
+              body: `## Deployment\n- **Date**: ${new Date().toISOString()}\n- **Commit**: ${context.sha}\n- **Triggered by**: ${context.actor}\n\n## Recent Changes\n${changelog}`,
+              draft: false,
+              prerelease: false
+            });
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

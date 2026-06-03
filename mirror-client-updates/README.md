@@ -1,4 +1,157 @@
-# mirror-client-updates — Goals #6 + #7
+# mirror-client-updates — Goals #6, #7, #8
+
+---
+
+## Goal #8 — CI/CD smoke test broke after the apex-redirect went live
+
+### What was wrong
+
+After the Apache apex-redirect vhost shipped (covered in the parent
+admin repo session, not in this folder), the next CI/CD run failed on
+the smoke-test step:
+
+```
+Running smoke test...
+Attempt 1/3...
+Smoke test response: HTTP 301
+Retrying in 3s...
+Attempt 2/3...
+Smoke test response: HTTP 301
+Retrying in 3s...
+Attempt 3/3...
+Smoke test response: HTTP 301
+Error: Smoke test FAILED — /Mirror/ not responding
+Error: Process completed with exit code 1.
+```
+
+### Why
+
+The smoke test SSHes to the production server and runs:
+
+```bash
+curl -sk -o /dev/null -w '%{http_code}' https://localhost/Mirror/
+```
+
+That talks to Apache on `127.0.0.1:443` with SNI = `localhost`. After
+the Goal #5/#6 series Apache now has TWO `*:443` vhosts:
+
+1. apex redirect — ServerName `theundergroundrailroad.world`,
+   `RewriteRule ^/?(.*)$ https://www.theundergroundrailroad.world/$1
+   [R=301,L,NE]`. Defined FIRST in source order, so it's also the
+   default vhost for unknown SNI like `localhost`.
+2. canonical app — ServerName `www.theundergroundrailroad.world`,
+   serves the actual `/Mirror/` SPA.
+
+Requests with SNI `localhost` no longer match anything → fall back to
+vhost (1) → get a 301 → the smoke test interprets the 301 as failure
+and bails.
+
+The Apache config is doing the right thing (unknown hostnames →
+redirect to canonical); the smoke test is what's wrong.
+
+### The fix
+
+`.github/workflows/ci-cd.yml` — two surgical edits:
+
+1. **The smoke-test curl** (around line 266): use `--resolve` to map
+   the canonical www hostname directly to `127.0.0.1`, then request
+   the canonical URL. curl still stays on loopback (no public DNS
+   round-trip, no public-internet path) BUT now sends the correct
+   SNI + Host header so Apache routes to the app vhost and returns
+   200. `-k` is dropped because the cert is valid for the www name.
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}' \
+     --resolve www.theundergroundrailroad.world:443:127.0.0.1 \
+     https://www.theundergroundrailroad.world/Mirror/
+   ```
+
+2. **The GitHub Actions deployment-environment URL** (around line
+   173): change `https://theundergroundrailroad.world/Mirror/` to
+   `https://www.theundergroundrailroad.world/Mirror/`. This is the
+   link surfaced in the Deployments tab and PR sidebar — purely
+   cosmetic, but worth updating in the same edit so the environment
+   link doesn't take reviewers through a 301 hop.
+
+### What this folder contains for Goal #8
+
+```
+mirror-client-updates/.github/workflows/ci-cd.yml   ← drop-in replacement
+```
+
+Diff vs the file at HEAD on Mirror is exactly the two edits above
+plus a multi-line WHY comment above the smoke-test loop. Run
+`diff` after copy to confirm the surgical scope before committing.
+
+### Why I didn't relax curl with `-L` instead
+
+`curl -L` would silently follow the 301 — the smoke test would pass
+again. But then it's no longer testing what it claims to test:
+
+- It would test that the redirect works.
+- It would test the canonical URL behind it.
+- It would NOT test that the deploy targeted the right place.
+
+Worse, `-L` would mask FUTURE regressions where the smoke test starts
+hitting an unintended URL via a chain of redirects. `--resolve`
+explicitly identifies the intended target and refuses to be misled.
+
+### Deployment
+
+```bash
+# In the Mirror checkout (develop branch):
+cp <admin-checkout>/mirror-client-updates/.github/workflows/ci-cd.yml \
+   .github/workflows/ci-cd.yml
+
+git diff .github/workflows/ci-cd.yml
+# Expect: the two edits above, nothing else.
+
+git add .github/workflows/ci-cd.yml
+git commit -m "ci: fix smoke test after apex-to-www redirect"
+git push
+```
+
+The next CI/CD run on the next merge to `main` (or whichever branch
+triggers the deploy) will use the corrected smoke test. The first
+attempt after deploy should print `HTTP 200` and exit 0.
+
+### Verification
+
+After the next CI run completes, check the GitHub Actions log for
+the deploy job. The Smoke test step should print:
+
+```
+Attempt 1/3...
+Smoke test response: HTTP 200
+Smoke test PASSED — /Mirror/ returns 200
+```
+
+If it still prints 301: `--resolve` didn't apply (curl version
+mismatch — `--resolve` is in curl ≥ 7.21.3 which is ancient, so this
+is essentially impossible on any current Ubuntu) OR the apex vhost
+ordering changed and the canonical vhost is no longer named
+www.theundergroundrailroad.world. Either is a config drift to chase
+separately.
+
+If it prints `HTTP 000`: the SSH itself failed — server unreachable
+or the deploy key rotated. That's an infra issue, not this workflow
+edit.
+
+### Rollback
+
+```bash
+git checkout HEAD~1 -- .github/workflows/ci-cd.yml
+git commit -m "ci: revert smoke test fix"
+git push
+```
+
+The previous smoke test would once again fail against the new Apache
+config (returning 301), so a rollback only makes sense if you're ALSO
+rolling back the apex-redirect vhost on the server.
+
+---
+
+## Goal #7 — Fix iOS PWA "stuck-layout-after-login" (Three.js canvas + general resize-stale state)
 
 This folder follows the same "drop-in patch for the Mirror client" pattern
 as `../mirror-frontend/`. Files here are intended to be copied verbatim
