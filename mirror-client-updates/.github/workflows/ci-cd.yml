@@ -236,6 +236,20 @@ jobs:
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -r \
             dist/* ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:$DIST_PATH/
 
+          # Apply readable permissions for Apache (www-data).
+          # scp preserves the SSH user's umask, which can leave files
+          # with a mode that excludes the world-read bit (e.g. 0600 or
+          # 0640) — Apache returns HTTP 403 on /Mirror/ when www-data
+          # can't read the served file. `a+rX` adds the read bit for
+          # everyone AND adds the search bit on directories only
+          # (uppercase X is "only on dirs or files already executable"),
+          # so files don't accidentally become +x. Public web assets are
+          # public; no harm in world-readable mode.
+          echo "[2.5/3] Fixing permissions..."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "chmod -R a+rX $DIST_PATH"
+
           # Step 3: Verify files landed
           echo "[3/3] Verifying deployment..."
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
