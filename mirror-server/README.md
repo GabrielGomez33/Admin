@@ -1,10 +1,114 @@
-# mirror-server drops — Goal #2 + Goal #3 + Goal #4
+# mirror-server drops — Goals #2, #3, #4, #5
 
-Three server-side fixes for the chat / WebSocket subsystem. Read Goal #4
-first — it's the most recently identified bug and the one currently
-visible in production (duplicate broadcast frames). Goal #3 supersedes
-the Goal #2 server changes (the multi-connection design covers the
-stale-WS race more thoroughly).
+Server-side fixes for the chat / WebSocket / notification subsystem.
+Read Goal #5 first if you're chasing the duplicate "DINA: processing
+started" notifications; Goal #4 if you're chasing duplicate Dina
+broadcast frames; Goal #3 supersedes the Goal #2 server changes (its
+multi-connection design covers the stale-WS race more thoroughly).
+
+---
+
+## Goal 5 — Suppress `dina_processing_started` notification (typing-cue, not a notification)
+
+### What this addresses
+
+After Goal #4 shipped, server logs confirmed exactly ONE
+`[DINA-BRIDGE] Delivered dina:processing_start ...` per @dina query,
+yet the in-app Notifications Center still showed TWO identical
+"DINA / DINA: processing started" entries stacking up per query.
+
+Investigation: the server emits TWO independent WS frames for every
+@dina query — they travel on different routes and serve different UI
+purposes:
+
+| frame | route | template / payload | UI purpose |
+| --- | --- | --- | --- |
+| `dina:processing_start` | `/mirror/groups/chat` (via setupWSS DINA bridge → chatWSHandler.broadcastToGroup) | raw `{type:"dina:processing_start", payload:{...}}` | in-chat "Dina is thinking" dots |
+| `notification:new` | `/mirror/groups/ws` (via mirrorGroupNotifications.sendNotification → deliverViaWebSocket) | `{type:"notification:new", payload:{title:"DINA", message:"DINA: processing started", ...}}` | adds an entry to the Notifications Center panel |
+
+Independently, the client's NotificationCenter is currently
+double-rendering each incoming `notification:new` frame (one WS frame
+→ two panel entries). That's a separate React-side bug. But even if
+that client double-add were fixed, the "DINA: processing started"
+entry on the panel would still be UX pollution — typing-indicator
+moments are not actionable notifications and they'd accumulate
+forever on every @dina query.
+
+The right fix is server-side and structural: do not generate a
+notification panel entry for a typing-indicator event in the first
+place. The in-chat dots are already driven independently and
+correctly by the `dina:processing_start` frame on the chat WS.
+
+### The fix
+
+`systems/mirrorGroupNotifications.ts` — short-circuit in the public
+`notify()` entry point. Before the template lookup, if the resolved
+internal type is `dina_processing_started`, return `true` immediately:
+the worker's call contract sees "delivered", but no `notification:new`
+frame goes out, nothing is enqueued to the Redis notification queue,
+nothing is dispatched to Web Push, nothing is written to DB.
+
+The `dina:processing_start` typing-cue frame on
+`DINA_BROADCAST_CHANNEL` is unaffected (it's published by the Dina
+worker directly, not by the notification system), so the in-chat
+"Dina is thinking" dots keep working exactly as before.
+
+### What this folder contains for Goal #5
+
+```
+mirror-server/systems/mirrorGroupNotifications.ts  ← drop-in replacement
+```
+
+Diff vs the pre-fix file is contained to a ~25-line block at the top
+of `notify()` (around line 962): one type-check + an early `return
+true` with a multi-line WHY comment.
+
+### Deployment
+
+```bash
+# In the mirror-server checkout:
+cp <admin-checkout>/mirror-server/systems/mirrorGroupNotifications.ts \
+   systems/mirrorGroupNotifications.ts
+npx tsc --noEmit
+pm2 reload mirror-server
+```
+
+The `dina-chat-worker` PM2 process does NOT need a reload — its
+publish-side call to `mirrorGroupNotifications.notify(...)` is via
+the public method which still resolves and returns truthy; just the
+delivery path is now a no-op.
+
+### Verification
+
+Send one `@dina` query. Inspect three things:
+
+1. **Server logs** (`pm2 logs mirror-server`):
+   - Still see exactly one `[DINA-BRIDGE] Delivered dina:processing_start ...`
+   - Should NO LONGER see `✅ WebSocket notification delivered to user ... (... connection)` paired with `type: dina_processing_started` in the very next millisecond. (You'll still see "delivered" for other notification types like the @mention, that's fine.)
+   - Should NO LONGER see the `Push skipped — user is active in app` line with `type: dina_processing_started`.
+
+2. **Client Notifications panel**: no "DINA: processing started" entries
+   appear at all per @dina query. (This is the desired end state. If the
+   user wants the entry back at exactly one occurrence, the client-side
+   double-add bug needs a separate fix; ping us if so.)
+
+3. **In-chat "Dina is thinking" dots**: still appear and disappear as
+   before. (If they don't, the `dina:processing_start` chat WS frame
+   path has regressed — that's unrelated to Goal #5 and needs separate
+   investigation.)
+
+### Rollback
+
+```bash
+git checkout HEAD~1 -- systems/mirrorGroupNotifications.ts
+pm2 reload mirror-server
+```
+
+### Pairs with: client-side Goal #6
+
+The mobile chat width fix in `../mirror-client-updates/` (see that
+folder's README) is a UX cleanup the same user reported in the same
+screenshot. They're independent; ship in any order.
 
 ---
 
