@@ -1,9 +1,145 @@
-# mirror-server drops — Goal #2 + Goal #3
+# mirror-server drops — Goal #2 + Goal #3 + Goal #4
 
-Two server-side fixes for the chat / WebSocket subsystem. Goal #3
-**supersedes** the Goal #2 server changes — once Goal #3 is shipped, the
-Goal #2 surgical patch is no longer needed (Goal #3 is a stronger,
-multi-connection design). Read the Goal #3 section first.
+Three server-side fixes for the chat / WebSocket subsystem. Read Goal #4
+first — it's the most recently identified bug and the one currently
+visible in production (duplicate broadcast frames). Goal #3 supersedes
+the Goal #2 server changes (the multi-connection design covers the
+stale-WS race more thoroughly).
+
+---
+
+## Goal 4 — Redis subscribe listener duplication (the doubling fix)
+
+### What this addresses
+
+Single-tab, single-device, `subscriberCount: 1` — and yet every Dina
+event (`dina:processing_start`, `dina:stream_start`,
+`dina:stream_chunk`, `dina:stream_complete`, the final `chat:message`)
+arrives at the client TWICE. Confirmed in production via
+`pm2 logs mirror-server`:
+
+```
+[DINA-BRIDGE] Delivered dina:processing_start to 1 client(s) in group ...
+[DINA-BRIDGE] Delivered dina:processing_start to 1 client(s) in group ...
+```
+
+Two `[DINA-BRIDGE]` lines per single Dina event, ~1ms apart. The log
+line lives inside the Redis subscribe callback in `wss/setupWSS.ts`, so
+two log entries = the callback firing twice = the broadcast happening
+twice = two WS frames delivered to each client.
+
+### Root cause — `config/redis.ts`
+
+`MirrorRedisManager.subscribe()` attaches a `'message'` listener on
+`this.subscriber` every time it's called:
+
+```ts
+async subscribe(channel, callback) {
+  this.channelCallbacks.set(channel, callback);
+  await this.subscriber.subscribe(channel);
+
+  // (Uses a named function reference so we don't stack duplicate listeners)
+  this.subscriber.on('message', this.handleSubscriberMessage);  // ← per CALL
+  ...
+}
+```
+
+The comment is wrong. Node's `EventEmitter.on(eventName, listener)`
+appends to the listeners array regardless of whether the same function
+reference is already attached. From the Node docs: *"No checks are made
+to see if the listener has already been added. Multiple calls passing
+the same combination of eventName and listener will result in the
+listener being added, and called, multiple times."*
+
+`wss/setupWSS.ts` calls `mirrorRedis.subscribe(...)` exactly twice at
+startup (DINA_BROADCAST_CHANNEL + `mirror:analysis:events`). After the
+second call the subscriber has 2 `'message'` listeners — both pointing
+at `handleSubscriberMessage` — so every incoming Redis message fires
+the routing dispatcher twice, which fires the channel callback twice,
+which broadcasts twice.
+
+This bug predates Goal #3. It was masked earlier because the prior
+multi-device disconnect cycle (Goal #3 root cause) was dropping clients
+before Dina events could be observed. With WS connections now stable,
+the doubling surfaced.
+
+### The fix — single file, one boolean
+
+`config/redis.ts`: add a `messageListenerAttached: boolean` flag on the
+manager. Only attach the listener if the flag is false; flip the flag
+after attach. Every subsequent `subscribe()` call adds the channel
+callback to the routing map without touching the listener.
+
+```ts
+private messageListenerAttached: boolean = false;
+
+async subscribe(channel, callback) {
+  this.channelCallbacks.set(channel, callback);
+  await this.subscriber.subscribe(channel);
+
+  if (!this.messageListenerAttached) {
+    this.subscriber.on('message', this.handleSubscriberMessage);
+    this.messageListenerAttached = true;
+  }
+  ...
+}
+```
+
+That's the entire fix.
+
+### Files
+
+```
+mirror-server/
+└── config/
+    └── redis.ts                ← surgical replacement (2 hunks: field add + subscribe guard)
+```
+
+### Enterprise concerns
+
+- **Idempotent.** Re-running `subscribe('channel-A', ...)` is fine —
+  channelCallbacks gets overwritten (correct behavior, same callback
+  ref or a new one wins); no listener churn.
+- **Backward compatible.** Existing call sites need no changes.
+- **No new attack surface.** Pure dedup of a routing dispatcher.
+- **Ioredis reconnect handling.** When ioredis reconnects the
+  subscriber socket, it re-issues SUBSCRIBE for every channel
+  automatically; the JS-side EventEmitter listeners persist across
+  reconnects (they're not Redis state). The guard correctly avoids
+  re-attaching a duplicate on reconnect.
+- **Observability.** After deploy, `pm2 logs mirror-server | grep
+  '[DINA-BRIDGE]'` should show exactly ONE line per Dina broadcast
+  event. If you see two, the deploy didn't take.
+
+### Deployment
+
+```bash
+# In the mirror-server checkout:
+cp <admin-checkout>/mirror-server/config/redis.ts config/redis.ts
+npx tsc --noEmit
+pm2 reload mirror-server
+```
+
+The `dina-chat-worker` process does NOT need a reload — it's only the
+PUBLISH side of the channel, which has no listener issue.
+
+### Verification
+
+1. Send a single `@dina hello` from one tab.
+2. `pm2 logs mirror-server | grep "[DINA-BRIDGE]"` — should show ONE line
+   for each of: `dina:processing_start`, `dina:stream_start`,
+   `dina:stream_complete`, `chat:message`.
+3. Open browser DevTools → Network → WS frames panel. Each event type
+   above appears exactly ONCE in the WS frame list.
+
+### Rollback
+
+```bash
+git checkout HEAD~1 -- config/redis.ts
+pm2 reload mirror-server
+```
+
+The bug reverts (duplicates return) but nothing else changes.
 
 ---
 
