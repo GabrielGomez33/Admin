@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import EmailPanel from './email/EmailPanel';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -37,6 +36,41 @@ interface SystemInfo {
   disk: { total: string; used: string; available: string; usagePercent: number } | null;
 }
 
+interface GpuUsage {
+  available: boolean;
+  error?: string;
+  name?: string;
+  driverVersion?: string;
+  memTotalMb?: number;
+  memUsedMb?: number;
+  memFreeMb?: number;
+  memUsagePercent?: number;
+  utilizationPercent?: number;
+  temperatureC?: number;
+  powerW?: number;
+  powerLimitW?: number;
+}
+
+interface GpuInferenceModel {
+  name: string;
+  gpuPercent: number;
+  processor: string;
+}
+
+interface GpuInference {
+  reachable: boolean;
+  state: string;
+  healthy: boolean;
+  summary: string;
+  loadedModels: GpuInferenceModel[];
+}
+
+interface GpuInfo {
+  usage: GpuUsage;
+  inference: GpuInference;
+  checkedAt: string;
+}
+
 interface LogEntry {
   timestamp: string;
   line: string;
@@ -59,6 +93,7 @@ interface OverviewData {
   processes: PM2Process[];
   system: SystemInfo;
   health: ServiceHealth[];
+  gpu?: GpuInfo;
   errors: ErrorGroup[];
   logFiles: LogFile[];
   serverStartedAt: string;
@@ -257,7 +292,7 @@ function ServiceArchitecture({ health, processes }: { health: ServiceHealth[]; p
   const mirrorH = health.find(h => h.name === 'mirror-server');
   const dinaH = health.find(h => h.name === 'dina-server');
   const mirrorWorkers = processes.filter(p =>
-    ['analysis-worker', 'dina-chat-worker', 'truthstream-worker', 'personal-analysis-worker', 'email-campaign-worker'].includes(p.name)
+    ['analysis-worker', 'dina-chat-worker', 'truthstream-worker', 'personal-analysis-worker'].includes(p.name)
   );
   const onlineCount = processes.filter(p => p.status === 'online').length;
   const totalMem = processes.reduce((sum, p) => sum + p.memory, 0);
@@ -486,6 +521,94 @@ function SystemVitals({ info }: { info: SystemInfo }) {
   );
 }
 
+function fmtMb(mb?: number): string {
+  if (mb === undefined) return '—';
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+}
+
+function GpuVitals({ gpu }: { gpu: GpuInfo }) {
+  const u = gpu.usage;
+  const inf = gpu.inference;
+
+  // Header dot: red if the GPU itself is unavailable (driver issue), yellow if
+  // Dina's inference has offloaded to CPU, green otherwise.
+  const headerStatus = !u.available
+    ? 'unhealthy'
+    : inf.state === 'cpu' || inf.state === 'partial'
+      ? 'degraded'
+      : 'healthy';
+
+  // Inference dot: green on GPU/idle, red on CPU/partial, grey otherwise.
+  const infStatus =
+    inf.state === 'gpu' || inf.state === 'idle'
+      ? 'healthy'
+      : inf.state === 'cpu' || inf.state === 'partial'
+        ? 'unhealthy'
+        : 'unreachable';
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-header">
+        <span className="card-title">GPU</span>
+        <StatusDot status={headerStatus} />
+      </div>
+
+      {u.available ? (
+        <div className="grid grid-4">
+          <div>
+            <div className="metric"><div className="metric-label">Device</div><div className="metric-value sm" style={{ fontSize: 12 }}>{u.name || '—'}</div></div>
+            <div className="metric"><div className="metric-label">Driver</div><div className="metric-value sm">{u.driverVersion || '—'}</div></div>
+          </div>
+          <div>
+            <div className="metric"><div className="metric-label">VRAM</div><div className="metric-value">{u.memUsagePercent ?? 0}%</div></div>
+            <ProgressBar percent={u.memUsagePercent ?? 0} />
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>{fmtMb(u.memUsedMb)} / {fmtMb(u.memTotalMb)}</div>
+          </div>
+          <div>
+            <div className="metric"><div className="metric-label">Utilization</div><div className="metric-value">{u.utilizationPercent ?? 0}%</div></div>
+            <ProgressBar percent={u.utilizationPercent ?? 0} />
+          </div>
+          <div>
+            <div className="metric"><div className="metric-label">Temp</div><div className="metric-value sm">{u.temperatureC !== undefined ? `${u.temperatureC}°C` : '—'}</div></div>
+            <div className="metric"><div className="metric-label">Power</div><div className="metric-value sm">{u.powerW !== undefined ? `${Math.round(u.powerW)}W` : '—'}{u.powerLimitW !== undefined ? ` / ${Math.round(u.powerLimitW)}W` : ''}</div></div>
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-red)' }}>
+          GPU unavailable: {u.error}
+          {/driver|nvml|mismatch/i.test(u.error || '') && (
+            <div style={{ color: 'var(--text-muted)', marginTop: 6 }}>
+              Likely a driver/library version mismatch — reboot the host to resync (see GPU runbook).
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Dina inference residency — is the LLM actually running on the GPU? */}
+      <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+        <div className="metric-label">Dina Inference</div>
+        <div className="metric-value sm" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+          <StatusDot status={infStatus} />
+          {inf.reachable ? inf.state.toUpperCase() : 'UNREACHABLE'}
+        </div>
+        {inf.summary && (
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>{inf.summary}</div>
+        )}
+        {inf.loadedModels.length > 0 && (
+          <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+            {inf.loadedModels.map((m) => (
+              <div key={m.name} style={{ display: 'flex', justifyContent: 'space-between', color: m.processor === 'gpu' ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>
+                <span>{m.name}</span>
+                <span>{m.gpuPercent}% GPU ({m.processor})</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ErrorFeed({ errors }: { errors: ErrorGroup[] }) {
   const hasErrors = errors.some(g => g.entries.length > 0);
   return (
@@ -625,6 +748,7 @@ function SystemPanel() {
       />
       <ServiceArchitecture health={data.health} processes={data.processes} />
       <SystemVitals info={data.system} />
+      {data.gpu && <GpuVitals gpu={data.gpu} />}
       <ProcessTable processes={data.processes} />
       <div style={{ marginTop: 16 }} />
       <ErrorFeed errors={data.errors} />
@@ -833,7 +957,7 @@ function DinaPanel() {
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'system' | 'mirror' | 'dina' | 'email';
+type Tab = 'system' | 'mirror' | 'dina';
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(!!getToken());
@@ -864,13 +988,13 @@ export default function App() {
         </div>
       </div>
       <div className="nav">
-        {(['system', 'mirror', 'dina', 'email'] as Tab[]).map(tab => (
+        {(['system', 'mirror', 'dina'] as Tab[]).map(tab => (
           <button
             key={tab}
             className={`nav-tab${activeTab === tab ? ' active' : ''}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === 'system' ? 'System Overview' : tab === 'mirror' ? 'Mirror Server' : tab === 'dina' ? 'DINA Server' : 'Email'}
+            {tab === 'system' ? 'System Overview' : tab === 'mirror' ? 'Mirror Server' : 'DINA Server'}
           </button>
         ))}
       </div>
@@ -878,7 +1002,6 @@ export default function App() {
         {activeTab === 'system' && <SystemPanel />}
         {activeTab === 'mirror' && <MirrorPanel />}
         {activeTab === 'dina' && <DinaPanel />}
-        {activeTab === 'email' && <EmailPanel />}
       </div>
     </div>
   );
