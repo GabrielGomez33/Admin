@@ -3,17 +3,19 @@ import { getPM2Processes } from '../services/pm2';
 import { getSystemInfo } from '../services/system';
 import { listLogFiles, tailLog, getRecentErrors } from '../services/logs';
 import { getAllHealth } from '../services/health';
+import { getGpuInfo } from '../services/gpu';
 
 export const systemRouter = Router();
 
 // GET /admin/api/system/overview — Full system dashboard data in one call
 systemRouter.get('/overview', async (_req, res) => {
   try {
-    const [processes, system, health, errors] = await Promise.all([
+    const [processes, system, health, errors, gpu] = await Promise.all([
       getPM2Processes(),
       getSystemInfo(),
       getAllHealth(),
       Promise.resolve(getRecentErrors(20)),
+      getGpuInfo(),
     ]);
 
     const logFiles = listLogFiles();
@@ -22,6 +24,7 @@ systemRouter.get('/overview', async (_req, res) => {
       processes,
       system,
       health,
+      gpu,
       errors,
       logFiles,
       serverStartedAt: startedAt,
@@ -52,6 +55,16 @@ systemRouter.get('/info', async (_req, res) => {
     res.json(info);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch system info' });
+  }
+});
+
+// GET /admin/api/system/gpu — GPU usage (nvidia-smi) + dina inference residency
+systemRouter.get('/gpu', async (_req, res) => {
+  try {
+    const gpu = await getGpuInfo();
+    res.json(gpu);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch GPU info' });
   }
 });
 
