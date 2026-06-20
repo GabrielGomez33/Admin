@@ -779,6 +779,7 @@ interface SimReport {
   steps: SimStep[];
   warnings: string[];
   error: string | null;
+  credentials: { email: string; username: string; password: string } | null;
 }
 interface SimHealth {
   dbReachable?: boolean; jwtConfigured?: boolean; internalSecretConfigured?: boolean;
@@ -804,6 +805,8 @@ function IntakeSimulationCard() {
   const [note, setNote] = useState('');
   const [dryRun, setDryRun] = useState(false);
   const [skipCleanup, setSkipCleanup] = useState(false);
+  const [simEmailLocal, setSimEmailLocal] = useState('');
+  const [simPassword, setSimPassword] = useState('');
 
   const refresh = useCallback(() => {
     api<{ data: SimHealth }>('/mirror/simulation/health').then(d => setHealth(d.data)).catch(() => {});
@@ -817,7 +820,13 @@ function IntakeSimulationCard() {
     try {
       const d = await api<{ success: boolean; data: SimReport }>('/mirror/simulation/run', {
         method: 'POST',
-        body: JSON.stringify({ dryRun, skipCleanup }),
+        body: JSON.stringify({
+          dryRun,
+          skipCleanup,
+          // Custom credentials only apply to a kept test user.
+          ...(skipCleanup && simEmailLocal ? { emailLocalPart: simEmailLocal } : {}),
+          ...(skipCleanup && simPassword ? { password: simPassword } : {}),
+        }),
       });
       setReport(d.data);
     } catch (e) {
@@ -826,7 +835,7 @@ function IntakeSimulationCard() {
       setRunning(false);
       refresh();
     }
-  }, [dryRun, skipCleanup, refresh]);
+  }, [dryRun, skipCleanup, simEmailLocal, simPassword, refresh]);
 
   const sweep = useCallback(async () => {
     setNote('');
@@ -889,6 +898,27 @@ function IntakeSimulationCard() {
         </button>
       </div>
 
+      {/* Custom credentials for a kept test user. The domain is fixed to the
+          reserved sim domain server-side; you choose the memorable local part. */}
+      {skipCleanup && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Test login:</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center' }}>
+            <input
+              type="text" value={simEmailLocal} onChange={e => setSimEmailLocal(e.target.value)} disabled={running}
+              placeholder="email name (optional)"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, padding: '6px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)', borderRadius: 3, width: 170 }}
+            />
+            <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, marginLeft: 4 }}>@{health?.simEmailDomain || 'simulation.mirror.invalid'}</span>
+          </span>
+          <input
+            type="text" value={simPassword} onChange={e => setSimPassword(e.target.value)} disabled={running}
+            placeholder="password (optional, blank = random)"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, padding: '6px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)', borderRadius: 3, minWidth: 260 }}
+          />
+        </div>
+      )}
+
       {!ready && health && (
         <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginBottom: 8 }}>
           Not ready — check DB connectivity and that MIRROR_INTERNAL_SECRET / JWT_SECRET are configured on mirror-server.
@@ -904,6 +934,20 @@ function IntakeSimulationCard() {
             <span style={{ color: 'var(--text-muted)' }}>user: {report.simUsername}{report.simUserId ? ` (#${report.simUserId})` : ''}</span>
             <span style={{ color: report.cleanedUp ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>{report.cleanedUp ? 'cleaned up ✓' : 'NOT cleaned up'}</span>
           </div>
+
+          {report.credentials && (
+            <div className="card" style={{ marginBottom: 12, borderColor: 'var(--accent-yellow)' }}>
+              <div className="card-header"><span className="card-title">Test user credentials — log in with these</span></div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, display: 'grid', gap: 4 }}>
+                <div><span style={{ color: 'var(--text-muted)' }}>email&nbsp;&nbsp;&nbsp;</span> <span style={{ color: 'var(--accent-white)', userSelect: 'all' }}>{report.credentials.email}</span></div>
+                <div><span style={{ color: 'var(--text-muted)' }}>username</span> <span style={{ color: 'var(--accent-white)', userSelect: 'all' }}>{report.credentials.username}</span></div>
+                <div><span style={{ color: 'var(--text-muted)' }}>password</span> <span style={{ color: 'var(--accent-white)', userSelect: 'all' }}>{report.credentials.password}</span></div>
+              </div>
+              <p style={{ color: 'var(--text-muted)', fontSize: 11, margin: '8px 0 0' }}>
+                Shown here only — never stored in run history or logs. The account is kept (email-verified, intake complete) until you Sweep orphans.
+              </p>
+            </div>
+          )}
 
           <div className="table-wrap">
             <table className="process-table">

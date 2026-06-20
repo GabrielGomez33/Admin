@@ -82,6 +82,9 @@ mirrorRouter.post('/simulation/run', async (req, res) => {
       dryRun: req.body?.dryRun === true,
       skipCleanup: req.body?.skipCleanup === true,
       label: typeof req.body?.label === 'string' ? req.body.label : undefined,
+      // Optional credentials for a kept test user (only used when skipCleanup).
+      password: typeof req.body?.password === 'string' && req.body.password.length > 0 ? req.body.password : undefined,
+      emailLocalPart: typeof req.body?.emailLocalPart === 'string' && req.body.emailLocalPart.length > 0 ? req.body.emailLocalPart : undefined,
     };
     const r = await mirrorSimRequest('POST', '/intake/run', body, operatorOf(req));
     res.status(r.status).json(r.body);
