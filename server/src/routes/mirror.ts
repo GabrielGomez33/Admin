@@ -124,3 +124,49 @@ mirrorRouter.post('/simulation/cleanup', async (req, res) => {
     res.status(502).json({ success: false, error: (error as Error).message || 'Failed to sweep simulation users' });
   }
 });
+
+// ----------------------------------------------------------------------------
+// TEST-USER MANAGER (proxied) — list / inspect / reset-password / delete kept
+// simulation users so an operator can log in as them and prove deletion.
+// ----------------------------------------------------------------------------
+
+// GET /admin/api/mirror/simulation/users — list kept test users
+mirrorRouter.get('/simulation/users', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('GET', '/intake/users', undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to list test users' });
+  }
+});
+
+// GET /admin/api/mirror/simulation/users/:id/verify — prove DB+disk footprint
+mirrorRouter.get('/simulation/users/:id/verify', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('GET', `/intake/users/${encodeURIComponent(req.params.id)}/verify`, undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to verify test user' });
+  }
+});
+
+// POST /admin/api/mirror/simulation/users/:id/reset-password — set a password
+mirrorRouter.post('/simulation/users/:id/reset-password', async (req, res) => {
+  try {
+    const body = { password: typeof req.body?.password === 'string' && req.body.password.length > 0 ? req.body.password : undefined };
+    const r = await mirrorSimRequest('POST', `/intake/users/${encodeURIComponent(req.params.id)}/reset-password`, body, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to reset password' });
+  }
+});
+
+// DELETE /admin/api/mirror/simulation/users/:id — delete one user, then verify
+mirrorRouter.delete('/simulation/users/:id', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('DELETE', `/intake/users/${encodeURIComponent(req.params.id)}`, undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to delete test user' });
+  }
+});

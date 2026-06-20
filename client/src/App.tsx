@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
+import type { CSSProperties } from 'react';
 import EmailPanel from './email/EmailPanel';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -791,13 +792,31 @@ interface SimRunRow {
   duration_ms: number | null; started_at: string; error: string | null;
 }
 
+interface SimUserFiles { tier1: number; tier2: number; tier3: number; total: number; }
+interface SimUser {
+  id: number; username: string; email: string;
+  createdAt: string | null; lastLogin: string | null;
+  emailVerified: boolean; intakeCompleted: boolean; files: SimUserFiles;
+}
+interface PurgeVerification {
+  userId: number; clean: boolean; usersRowPresent: boolean;
+  dbResidue: { table: string; column: string; rows: number }[];
+  dbTablesScanned: number;
+  scanErrors: { table: string; column: string; error: string }[];
+  storage: SimUserFiles; storageDirPresent: boolean | null; storageClean: boolean;
+}
+interface DeleteSimUserResult {
+  deleted: boolean; userId: number; username: string; email: string;
+  dinaNotified: boolean; dinaDetail?: string; verification: PurgeVerification;
+}
+
 // Map a run/step status to a StatusDot class (healthy=green, degraded=yellow, unhealthy=red).
 const simStatusDot = (s: string): string =>
   s === 'passed' || s === 'pass' ? 'healthy'
   : s === 'failed' || s === 'fail' ? 'unhealthy'
   : 'degraded';
 
-function IntakeSimulationCard() {
+function IntakeSimulationCard({ onUsersChanged }: { onUsersChanged?: () => void }) {
   const [health, setHealth] = useState<SimHealth | null>(null);
   const [runs, setRuns] = useState<SimRunRow[]>([]);
   const [report, setReport] = useState<SimReport | null>(null);
@@ -834,8 +853,9 @@ function IntakeSimulationCard() {
     } finally {
       setRunning(false);
       refresh();
+      onUsersChanged?.();
     }
-  }, [dryRun, skipCleanup, simEmailLocal, simPassword, refresh]);
+  }, [dryRun, skipCleanup, simEmailLocal, simPassword, refresh, onUsersChanged]);
 
   const sweep = useCallback(async () => {
     setNote('');
@@ -848,8 +868,9 @@ function IntakeSimulationCard() {
       setNote((e as Error).message || 'Sweep failed');
     } finally {
       refresh();
+      onUsersChanged?.();
     }
-  }, [refresh]);
+  }, [refresh, onUsersChanged]);
 
   const ready = !!(health?.dbReachable && health?.internalSecretConfigured && health?.jwtConfigured);
 
@@ -999,11 +1020,195 @@ function IntakeSimulationCard() {
   );
 }
 
+// Renders one purge/footprint verification (used for both inspect and delete).
+function VerificationDetail({ v, deleted }: { v: PurgeVerification; deleted: boolean }) {
+  const headline = deleted
+    ? (v.clean ? 'TRULY DELETED ✓ — no trace in DB or on disk' : 'DELETED — but residue was found below')
+    : (v.clean ? 'No data found for this user' : 'Current data footprint');
+  const color = v.clean ? 'var(--accent-green)' : (deleted ? 'var(--accent-red)' : 'var(--text-secondary)');
+  return (
+    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.6 }}>
+      <div style={{ color, fontWeight: 600, marginBottom: 4 }}>{headline}</div>
+      <div style={{ color: 'var(--text-muted)' }}>
+        users row: <span style={{ color: v.usersRowPresent ? 'var(--accent-yellow)' : 'var(--accent-green)' }}>{v.usersRowPresent ? 'present' : 'gone'}</span>
+        {' · '}DB columns scanned: {v.dbTablesScanned}
+        {' · '}storage dir: <span style={{ color: v.storageDirPresent ? 'var(--accent-yellow)' : 'var(--accent-green)' }}>{v.storageDirPresent === null ? 'unknown' : v.storageDirPresent ? 'present' : 'gone'}</span>
+        {' · '}files t1/t2/t3: {v.storage.tier1}/{v.storage.tier2}/{v.storage.tier3}
+      </div>
+      {v.dbResidue.length > 0 && (
+        <div style={{ color: 'var(--accent-red)', marginTop: 4 }}>
+          residual rows:
+          {v.dbResidue.map((r, i) => <div key={i}>&nbsp;&nbsp;• {r.table}.{r.column} = {r.rows}</div>)}
+        </div>
+      )}
+      {v.scanErrors.length > 0 && (
+        <div style={{ color: 'var(--accent-yellow)', marginTop: 4 }}>
+          scan warnings:
+          {v.scanErrors.map((r, i) => <div key={i}>&nbsp;&nbsp;• {r.table}.{r.column}: {r.error}</div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CredentialsBox({ c }: { c: { email: string; username: string; password: string } }) {
+  return (
+    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, marginBottom: 6 }}>
+      <span style={{ color: 'var(--accent-yellow)' }}>New login →</span>{' '}
+      <span style={{ userSelect: 'all', color: 'var(--accent-white)' }}>{c.email}</span>
+      {'  /  '}
+      <span style={{ userSelect: 'all', color: 'var(--accent-white)' }}>{c.password}</span>
+    </div>
+  );
+}
+
+const tuBtn: CSSProperties = { padding: '4px 10px', fontSize: 11, marginRight: 6 };
+
+// Manage kept simulation users: log in as them (reset password), inspect their
+// data footprint, and delete them with a proof that nothing remains.
+function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
+  const [users, setUsers] = useState<SimUser[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [note, setNote] = useState('');
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [verify, setVerify] = useState<Record<number, PurgeVerification>>({});
+  const [creds, setCreds] = useState<Record<number, { email: string; username: string; password: string }>>({});
+  const [deletions, setDeletions] = useState<Record<number, DeleteSimUserResult>>({});
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api<{ data: SimUser[] }>('/mirror/simulation/users')
+      .then(d => setUsers(d.data || []))
+      .catch(e => setNote((e as Error).message || 'Failed to load test users'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { load(); }, [load, refreshKey]);
+
+  const inspect = useCallback(async (id: number) => {
+    setBusyId(id); setNote('');
+    try {
+      const d = await api<{ data: PurgeVerification }>(`/mirror/simulation/users/${id}/verify`);
+      setVerify(v => ({ ...v, [id]: d.data }));
+    } catch (e) { setNote((e as Error).message || 'Inspect failed'); }
+    finally { setBusyId(null); }
+  }, []);
+
+  const resetPw = useCallback(async (id: number) => {
+    const pw = window.prompt('New password for this test user (leave blank = strong random; min 8 chars to set your own):', '');
+    if (pw === null) return; // cancelled
+    setBusyId(id); setNote('');
+    try {
+      const d = await api<{ data: { email: string; username: string; password: string } }>(
+        `/mirror/simulation/users/${id}/reset-password`,
+        { method: 'POST', body: JSON.stringify({ password: pw || undefined }) },
+      );
+      setCreds(c => ({ ...c, [id]: d.data }));
+    } catch (e) { setNote((e as Error).message || 'Password reset failed'); }
+    finally { setBusyId(null); }
+  }, []);
+
+  const del = useCallback(async (id: number, email: string) => {
+    if (!window.confirm(`Permanently delete test user ${email} (#${id})?\n\nThis runs the full account-deletion teardown (database rows + stored files + Dina purge) and then verifies that nothing remains.`)) return;
+    setBusyId(id); setNote('');
+    try {
+      const d = await api<{ data: DeleteSimUserResult }>(`/mirror/simulation/users/${id}`, { method: 'DELETE' });
+      setDeletions(r => ({ ...r, [id]: d.data }));
+      setVerify(v => { const n = { ...v }; delete n[id]; return n; });
+      setCreds(c => { const n = { ...c }; delete n[id]; return n; });
+      setNote(d.data.verification.clean
+        ? `User #${id} deleted and verified — nothing remains.`
+        : `User #${id} deleted, but residual data was found — see Deletion results.`);
+      load();
+    } catch (e) { setNote((e as Error).message || 'Delete failed'); }
+    finally { setBusyId(null); }
+  }, [load]);
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-header">
+        <span className="card-title">Test Users — kept simulations</span>
+        <button className="nav-tab" onClick={load} disabled={loading} style={{ padding: '6px 12px', fontSize: 11 }}>
+          {loading ? 'Loading…' : 'Refresh'}
+        </button>
+      </div>
+
+      {note && <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginBottom: 8, fontFamily: 'var(--font-mono)' }}>{note}</div>}
+
+      {users.length === 0 && !loading ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: 0 }}>
+          No kept test users. Run a simulation with “Keep sim user (debug)” checked to create one.
+        </p>
+      ) : (
+        <div className="table-wrap">
+          <table className="process-table">
+            <thead><tr>
+              <th>ID</th><th>Email / Username</th><th>Created</th><th>Flags</th><th>Files t1/t2/t3</th><th>Actions</th>
+            </tr></thead>
+            <tbody>
+              {users.map(u => (
+                <Fragment key={u.id}>
+                  <tr>
+                    <td>#{u.id}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                      <div style={{ color: 'var(--accent-white)', userSelect: 'all' }}>{u.email}</div>
+                      <div style={{ color: 'var(--text-muted)' }}>{u.username}</div>
+                    </td>
+                    <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{u.createdAt ? new Date(u.createdAt).toLocaleString() : '--'}</td>
+                    <td style={{ fontSize: 11 }}>
+                      <span style={{ color: u.emailVerified ? 'var(--accent-green)' : 'var(--text-muted)' }}>{u.emailVerified ? 'verified' : 'unverified'}</span>
+                      {' · '}
+                      <span style={{ color: u.intakeCompleted ? 'var(--accent-green)' : 'var(--text-muted)' }}>{u.intakeCompleted ? 'intake✓' : 'no intake'}</span>
+                    </td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{u.files.tier1}/{u.files.tier2}/{u.files.tier3}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      <button className="nav-tab" style={tuBtn} disabled={busyId === u.id} onClick={() => inspect(u.id)}>Inspect</button>
+                      <button className="nav-tab" style={tuBtn} disabled={busyId === u.id} onClick={() => resetPw(u.id)}>Reset PW</button>
+                      <button className="nav-tab" style={{ ...tuBtn, color: 'var(--accent-red)', borderColor: 'var(--accent-red)' }} disabled={busyId === u.id} onClick={() => del(u.id, u.email)}>Delete</button>
+                    </td>
+                  </tr>
+                  {(creds[u.id] || verify[u.id]) && (
+                    <tr>
+                      <td colSpan={6} style={{ background: 'var(--bg-secondary)' }}>
+                        {creds[u.id] && <CredentialsBox c={creds[u.id]} />}
+                        {verify[u.id] && <VerificationDetail v={verify[u.id]} deleted={false} />}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {Object.keys(deletions).length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>Deletion results (proof of teardown)</div>
+          {Object.values(deletions).sort((a, b) => b.userId - a.userId).map(r => (
+            <div key={r.userId} className="card" style={{ marginBottom: 8, borderColor: r.verification.clean ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+              <div style={{ fontSize: 12, marginBottom: 4 }}>
+                #{r.userId}{' '}
+                {r.email && <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>{r.email}</span>}
+                {' · '}Dina purge: <span style={{ color: r.dinaNotified ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>{r.dinaNotified ? 'acknowledged' : `not confirmed${r.dinaDetail ? ` (${r.dinaDetail})` : ''}`}</span>
+              </div>
+              <VerificationDetail v={r.verification} deleted={true} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MirrorPanel() {
   const [health, setHealth] = useState<ServiceHealth | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logType, setLogType] = useState<'out' | 'error'>('out');
+  // Bumped whenever a simulation run/sweep may have changed the kept-user set,
+  // so the Test Users panel re-fetches without the operator clicking Refresh.
+  const [simUsersRefresh, setSimUsersRefresh] = useState(0);
 
   const fetchAll = useCallback(() => {
     api<ServiceHealth>('/mirror/health').then(setHealth).catch(() => {});
@@ -1047,7 +1252,9 @@ function MirrorPanel() {
         </div>
       )}
 
-      <IntakeSimulationCard />
+      <IntakeSimulationCard onUsersChanged={() => setSimUsersRefresh(k => k + 1)} />
+
+      <TestUsersPanel refreshKey={simUsersRefresh} />
 
       {features && (
         <div className="card" style={{ marginBottom: 16 }}>
