@@ -1,9 +1,15 @@
-import { Router } from 'express';
+import { Router, Request } from 'express';
 import { getMirrorHealth } from '../services/health';
 import { getPM2Processes } from '../services/pm2';
 import { tailLog } from '../services/logs';
+import { mirrorSimRequest } from '../services/mirrorSimulationClient';
 
 export const mirrorRouter = Router();
+
+// Operator identity for audit — set by authMiddleware after JWT verification.
+function operatorOf(req: Request): string {
+  return req.admin?.username || 'admin';
+}
 
 // GET /admin/api/mirror/health — Mirror server health
 mirrorRouter.get('/health', async (_req, res) => {
@@ -48,4 +54,70 @@ mirrorRouter.get('/workers', (_req, res) => {
     recent: tailLog(`${name}-out.log`, 10),
   }));
   res.json({ workers: result });
+});
+
+// ============================================================================
+// INTAKE SIMULATION (proxied to mirror-server's internal admin API)
+// ----------------------------------------------------------------------------
+// The human operator is already authenticated by admin-server's authMiddleware.
+// These handlers forward the request to mirror-server over localhost with the
+// shared internal secret + the operator's username (mirrorSimRequest), and
+// relay mirror-server's status code + JSON body straight back to the client.
+// ============================================================================
+
+// GET /admin/api/mirror/simulation/health — readiness of the simulation tool
+mirrorRouter.get('/simulation/health', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('GET', '/health', undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to reach simulation API' });
+  }
+});
+
+// POST /admin/api/mirror/simulation/run — run a full intake simulation
+mirrorRouter.post('/simulation/run', async (req, res) => {
+  try {
+    const body = {
+      dryRun: req.body?.dryRun === true,
+      skipCleanup: req.body?.skipCleanup === true,
+      label: typeof req.body?.label === 'string' ? req.body.label : undefined,
+    };
+    const r = await mirrorSimRequest('POST', '/intake/run', body, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to run intake simulation' });
+  }
+});
+
+// GET /admin/api/mirror/simulation/runs — recent run history
+mirrorRouter.get('/simulation/runs', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const r = await mirrorSimRequest('GET', `/intake/runs?limit=${limit}`, undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to list simulation runs' });
+  }
+});
+
+// GET /admin/api/mirror/simulation/runs/:id — a single run report
+mirrorRouter.get('/simulation/runs/:id', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('GET', `/intake/runs/${encodeURIComponent(req.params.id)}`, undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to fetch simulation run' });
+  }
+});
+
+// POST /admin/api/mirror/simulation/cleanup — sweep orphaned simulation users
+mirrorRouter.post('/simulation/cleanup', async (req, res) => {
+  try {
+    const body = { maxAgeMinutes: Number.isFinite(req.body?.maxAgeMinutes) ? Number(req.body.maxAgeMinutes) : 0 };
+    const r = await mirrorSimRequest('POST', '/intake/cleanup', body, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to sweep simulation users' });
+  }
 });

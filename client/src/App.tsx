@@ -763,6 +763,198 @@ function SystemPanel() {
   );
 }
 
+// ─── Intake Simulation (Mirror tab) ────────────────────────────────────────────
+
+interface SimStep { name: string; ok: boolean; severity: 'pass' | 'warn' | 'fail'; ms: number; detail: string; }
+interface SimReport {
+  runId: string;
+  status: 'passed' | 'passed_with_warnings' | 'failed';
+  dryRun: boolean;
+  operator: string;
+  simUserId: number | null;
+  simUsername: string;
+  simEmail: string;
+  durationMs: number;
+  cleanedUp: boolean;
+  steps: SimStep[];
+  warnings: string[];
+  error: string | null;
+}
+interface SimHealth {
+  dbReachable?: boolean; jwtConfigured?: boolean; internalSecretConfigured?: boolean;
+  runInFlight?: boolean; selfBaseUrl?: string; simEmailDomain?: string; iqItemSetVersion?: string;
+}
+interface SimRunRow {
+  run_id: string; operator: string | null; status: string; dry_run: number;
+  sim_user_id: number | null; sim_username: string | null; cleaned_up: number;
+  duration_ms: number | null; started_at: string; error: string | null;
+}
+
+// Map a run/step status to a StatusDot class (healthy=green, degraded=yellow, unhealthy=red).
+const simStatusDot = (s: string): string =>
+  s === 'passed' || s === 'pass' ? 'healthy'
+  : s === 'failed' || s === 'fail' ? 'unhealthy'
+  : 'degraded';
+
+function IntakeSimulationCard() {
+  const [health, setHealth] = useState<SimHealth | null>(null);
+  const [runs, setRuns] = useState<SimRunRow[]>([]);
+  const [report, setReport] = useState<SimReport | null>(null);
+  const [running, setRunning] = useState(false);
+  const [note, setNote] = useState('');
+  const [dryRun, setDryRun] = useState(false);
+  const [skipCleanup, setSkipCleanup] = useState(false);
+
+  const refresh = useCallback(() => {
+    api<{ data: SimHealth }>('/mirror/simulation/health').then(d => setHealth(d.data)).catch(() => {});
+    api<{ data: SimRunRow[] }>('/mirror/simulation/runs?limit=8').then(d => setRuns(d.data || [])).catch(() => {});
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const run = useCallback(async () => {
+    setRunning(true); setNote(''); setReport(null);
+    try {
+      const d = await api<{ success: boolean; data: SimReport }>('/mirror/simulation/run', {
+        method: 'POST',
+        body: JSON.stringify({ dryRun, skipCleanup }),
+      });
+      setReport(d.data);
+    } catch (e) {
+      setNote((e as Error).message || 'Simulation failed to start');
+    } finally {
+      setRunning(false);
+      refresh();
+    }
+  }, [dryRun, skipCleanup, refresh]);
+
+  const sweep = useCallback(async () => {
+    setNote('');
+    try {
+      const d = await api<{ data: { scanned: number; purged: number } }>('/mirror/simulation/cleanup', {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      setNote(`Sweep complete — scanned ${d.data.scanned}, purged ${d.data.purged}.`);
+    } catch (e) {
+      setNote((e as Error).message || 'Sweep failed');
+    } finally {
+      refresh();
+    }
+  }, [refresh]);
+
+  const ready = !!(health?.dbReachable && health?.internalSecretConfigured && health?.jwtConfigured);
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-header">
+        <span className="card-title">Intake Simulation</span>
+        {report && <StatusDot status={simStatusDot(report.status)} />}
+      </div>
+
+      <p style={{ color: 'var(--text-secondary)', fontSize: 13, margin: '0 0 12px' }}>
+        Runs a real end-to-end intake against a throwaway, clearly-marked sim user
+        (register → upload photo + voice → store intake → verify folders, files &amp; DB
+        → decrypt read-back), then deletes every trace. Confirms the intake pipeline is
+        healthy without clicking through the whole flow.
+      </p>
+
+      {health && (
+        <div className="metric-row" style={{ marginBottom: 12 }}>
+          <div className="metric"><div className="metric-label">DB</div><div className="metric-value sm" style={{ color: health.dbReachable ? 'var(--accent-green)' : 'var(--accent-red)' }}>{health.dbReachable ? 'reachable' : 'down'}</div></div>
+          <div className="metric"><div className="metric-label">Internal secret</div><div className="metric-value sm" style={{ color: health.internalSecretConfigured ? 'var(--accent-green)' : 'var(--accent-red)' }}>{health.internalSecretConfigured ? 'set' : 'missing'}</div></div>
+          <div className="metric"><div className="metric-label">JWT</div><div className="metric-value sm" style={{ color: health.jwtConfigured ? 'var(--accent-green)' : 'var(--accent-red)' }}>{health.jwtConfigured ? 'set' : 'missing'}</div></div>
+          <div className="metric"><div className="metric-label">State</div><div className="metric-value sm">{health.runInFlight ? 'running…' : 'idle'}</div></div>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+        <button
+          className="nav-tab"
+          onClick={run}
+          disabled={running || !ready}
+          style={{ padding: '8px 18px', border: '1px solid var(--accent-green)', borderRadius: 4, color: running || !ready ? 'var(--text-muted)' : 'var(--accent-green)', opacity: running || !ready ? 0.6 : 1 }}
+        >{running ? 'Running…' : 'Run Simulation'}</button>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+          <input type="checkbox" checked={dryRun} onChange={e => setDryRun(e.target.checked)} disabled={running} />
+          Dry run (readiness only)
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+          <input type="checkbox" checked={skipCleanup} onChange={e => setSkipCleanup(e.target.checked)} disabled={running} />
+          Keep sim user (debug)
+        </label>
+
+        <button className="nav-tab" onClick={sweep} disabled={running} style={{ padding: '8px 14px', fontSize: 11, marginLeft: 'auto' }}>
+          Sweep orphans
+        </button>
+      </div>
+
+      {!ready && health && (
+        <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginBottom: 8 }}>
+          Not ready — check DB connectivity and that MIRROR_INTERNAL_SECRET / JWT_SECRET are configured on mirror-server.
+        </div>
+      )}
+      {note && <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginBottom: 8, fontFamily: 'var(--font-mono)' }}>{note}</div>}
+
+      {report && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontFamily: 'var(--font-mono)', fontSize: 12, marginBottom: 8 }}>
+            <span>Result: <strong style={{ color: report.status === 'failed' ? 'var(--accent-red)' : report.status === 'passed' ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>{report.status.replace(/_/g, ' ').toUpperCase()}</strong></span>
+            <span style={{ color: 'var(--text-muted)' }}>{report.durationMs} ms</span>
+            <span style={{ color: 'var(--text-muted)' }}>user: {report.simUsername}{report.simUserId ? ` (#${report.simUserId})` : ''}</span>
+            <span style={{ color: report.cleanedUp ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>{report.cleanedUp ? 'cleaned up ✓' : 'NOT cleaned up'}</span>
+          </div>
+
+          <div className="table-wrap">
+            <table className="process-table">
+              <thead><tr><th>Step</th><th>Result</th><th>ms</th><th>Detail</th></tr></thead>
+              <tbody>
+                {report.steps.map((s, i) => (
+                  <tr key={i}>
+                    <td><StatusDot status={simStatusDot(s.severity)} />{s.name}</td>
+                    <td style={{ color: s.severity === 'fail' ? 'var(--accent-red)' : s.severity === 'warn' ? 'var(--accent-yellow)' : 'var(--accent-green)' }}>{s.severity}</td>
+                    <td style={{ color: 'var(--text-muted)' }}>{s.ms}</td>
+                    <td style={{ color: 'var(--text-secondary)', fontSize: 12 }}>{s.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {report.warnings.length > 0 && (
+            <ul style={{ color: 'var(--accent-yellow)', fontSize: 12, margin: '8px 0 0', paddingLeft: 18 }}>
+              {report.warnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          )}
+          {report.error && <div style={{ color: 'var(--accent-red)', fontSize: 12, marginTop: 8, fontFamily: 'var(--font-mono)' }}>Error: {report.error}</div>}
+        </div>
+      )}
+
+      {runs.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div className="card-header" style={{ marginBottom: 8 }}><span className="card-title">Recent Runs</span></div>
+          <div className="table-wrap">
+            <table className="process-table">
+              <thead><tr><th>When</th><th>Status</th><th>Operator</th><th>ms</th><th>Clean</th></tr></thead>
+              <tbody>
+                {runs.map(r => (
+                  <tr key={r.run_id}>
+                    <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{new Date(r.started_at).toLocaleString()}</td>
+                    <td><StatusDot status={simStatusDot(r.status)} />{r.status}</td>
+                    <td style={{ color: 'var(--text-secondary)' }}>{r.operator || '--'}</td>
+                    <td style={{ color: 'var(--text-muted)' }}>{r.duration_ms ?? '--'}</td>
+                    <td style={{ color: r.cleaned_up ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>{r.cleaned_up ? '✓' : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MirrorPanel() {
   const [health, setHealth] = useState<ServiceHealth | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[]>([]);
@@ -810,6 +1002,8 @@ function MirrorPanel() {
           </div>
         </div>
       )}
+
+      <IntakeSimulationCard />
 
       {features && (
         <div className="card" style={{ marginBottom: 16 }}>
