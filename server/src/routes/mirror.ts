@@ -85,6 +85,9 @@ mirrorRouter.post('/simulation/run', async (req, res) => {
       // Optional credentials for a kept test user (only used when skipCleanup).
       password: typeof req.body?.password === 'string' && req.body.password.length > 0 ? req.body.password : undefined,
       emailLocalPart: typeof req.body?.emailLocalPart === 'string' && req.body.emailLocalPart.length > 0 ? req.body.emailLocalPart : undefined,
+      // Optional TruthStream report card for a kept user.
+      truthCard: req.body?.truthCard === true,
+      reviewTone: typeof req.body?.reviewTone === 'string' ? req.body.reviewTone : undefined,
     };
     const r = await mirrorSimRequest('POST', '/intake/run', body, operatorOf(req));
     res.status(r.status).json(r.body);
@@ -150,6 +153,16 @@ mirrorRouter.get('/simulation/users/:id/verify', async (req, res) => {
   }
 });
 
+// GET /admin/api/mirror/simulation/users/:id/truthstream — card + reviews + report
+mirrorRouter.get('/simulation/users/:id/truthstream', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('GET', `/intake/users/${encodeURIComponent(req.params.id)}/truthstream`, undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to read TruthStream report' });
+  }
+});
+
 // POST /admin/api/mirror/simulation/users/:id/reset-password — set a password
 mirrorRouter.post('/simulation/users/:id/reset-password', async (req, res) => {
   try {
@@ -168,5 +181,45 @@ mirrorRouter.delete('/simulation/users/:id', async (req, res) => {
     res.status(r.status).json(r.body);
   } catch (error) {
     res.status(502).json({ success: false, error: (error as Error).message || 'Failed to delete test user' });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// TRUTHSTREAM REVIEW RUNNER (proxied)
+// ----------------------------------------------------------------------------
+
+// GET /admin/api/mirror/simulation/reviewable-users — sim users + profile flag
+mirrorRouter.get('/simulation/reviewable-users', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('GET', '/intake/reviewable-users', undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to list reviewable users' });
+  }
+});
+
+// GET /admin/api/mirror/simulation/user-search?q= — find any user for a reviewee
+mirrorRouter.get('/simulation/user-search', async (req, res) => {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
+    const r = await mirrorSimRequest('GET', `/intake/user-search?q=${encodeURIComponent(q)}`, undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'User search failed' });
+  }
+});
+
+// POST /admin/api/mirror/simulation/reviews/run — run one targeted review
+mirrorRouter.post('/simulation/reviews/run', async (req, res) => {
+  try {
+    const body = {
+      reviewerId: Number(req.body?.reviewerId),
+      revieweeId: Number(req.body?.revieweeId),
+      tone: typeof req.body?.tone === 'string' ? req.body.tone : undefined,
+    };
+    const r = await mirrorSimRequest('POST', '/intake/reviews/run', body, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to run review' });
   }
 });
