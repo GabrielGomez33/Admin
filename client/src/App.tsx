@@ -781,7 +781,49 @@ interface SimReport {
   warnings: string[];
   error: string | null;
   credentials: { email: string; username: string; password: string } | null;
+  truthCard: { profile: boolean; goalCategory: string | null; reviewsSeeded: number; helperUserIds: number[]; analysisRequested: boolean } | null;
 }
+
+// The five self-tagged review tones the TruthStream questionnaire allows.
+const REVIEW_TONES = [
+  'Encouraging and supportive',
+  'Honest but kind',
+  'Direct and unfiltered',
+  'Critical with constructive intent',
+  'Tough love',
+];
+
+interface ReviewableUser {
+  id: number; username: string; email: string;
+  isSim: boolean; hasProfile: boolean; goalCategory: string | null;
+}
+interface TargetedReviewResult {
+  reviewId: string | null; reviewerId: number; revieweeId: number; revieweeIsSim: boolean;
+  tone: string; goalCategory: string;
+  qualityScore: number | null; completenessScore: number | null; depthScore: number | null;
+  classificationPending: boolean;
+}
+interface TruthStreamReviewSummary {
+  id: string; classification: string | null; classificationConfidence: number | null;
+  qualityScore: number | null; completenessScore: number | null; depthScore: number | null;
+  tone: string | null; snippet: string | null; createdAt: string | null;
+}
+interface TruthStreamUserReport {
+  hasProfile: boolean; minReviewsForAnalysis: number;
+  profile: {
+    displayAlias: string; goalCategory: string; isActive: boolean;
+    totalReviewsReceived: number; totalReviewsGiven: number;
+    reviewQualityScore: number | null; perceptionGapScore: number | null; profileCompleteness: number | null;
+  } | null;
+  receivedReviews: TruthStreamReviewSummary[];
+  givenReviews: { id: string; revieweeId: number; classification: string | null; qualityScore: number | null; createdAt: string | null }[];
+  analysis: {
+    analysisType: string; reviewCountAtGeneration: number; perceptionGapScore: number | null;
+    confidenceLevel: number | null; createdAt: string | null; summary: string | null;
+  } | null;
+  pendingJobs: { jobType: string; status: string; createdAt: string | null }[];
+}
+
 interface SimHealth {
   dbReachable?: boolean; jwtConfigured?: boolean; internalSecretConfigured?: boolean;
   runInFlight?: boolean; selfBaseUrl?: string; simEmailDomain?: string; iqItemSetVersion?: string;
@@ -826,6 +868,8 @@ function IntakeSimulationCard({ onUsersChanged }: { onUsersChanged?: () => void 
   const [skipCleanup, setSkipCleanup] = useState(false);
   const [simEmailLocal, setSimEmailLocal] = useState('');
   const [simPassword, setSimPassword] = useState('');
+  const [makeTruthCard, setMakeTruthCard] = useState(false);
+  const [reviewTone, setReviewTone] = useState(REVIEW_TONES[1]);
 
   const refresh = useCallback(() => {
     api<{ data: SimHealth }>('/mirror/simulation/health').then(d => setHealth(d.data)).catch(() => {});
@@ -842,9 +886,10 @@ function IntakeSimulationCard({ onUsersChanged }: { onUsersChanged?: () => void 
         body: JSON.stringify({
           dryRun,
           skipCleanup,
-          // Custom credentials only apply to a kept test user.
+          // Custom credentials + TruthStream card only apply to a kept test user.
           ...(skipCleanup && simEmailLocal ? { emailLocalPart: simEmailLocal } : {}),
           ...(skipCleanup && simPassword ? { password: simPassword } : {}),
+          ...(skipCleanup && makeTruthCard ? { truthCard: true, reviewTone } : {}),
         }),
       });
       setReport(d.data);
@@ -855,7 +900,7 @@ function IntakeSimulationCard({ onUsersChanged }: { onUsersChanged?: () => void 
       refresh();
       onUsersChanged?.();
     }
-  }, [dryRun, skipCleanup, simEmailLocal, simPassword, refresh, onUsersChanged]);
+  }, [dryRun, skipCleanup, simEmailLocal, simPassword, makeTruthCard, reviewTone, refresh, onUsersChanged]);
 
   const sweep = useCallback(async () => {
     setNote('');
@@ -940,6 +985,26 @@ function IntakeSimulationCard({ onUsersChanged }: { onUsersChanged?: () => void 
         </div>
       )}
 
+      {/* TruthStream report card for a kept user (profile + seeded reviews + report). */}
+      {skipCleanup && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+            <input type="checkbox" checked={makeTruthCard} onChange={e => setMakeTruthCard(e.target.checked)} disabled={running} />
+            Also create TruthStream report card
+          </label>
+          {makeTruthCard && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+              tone:
+              <select value={reviewTone} onChange={e => setReviewTone(e.target.value)} disabled={running}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: 12, padding: '5px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)', borderRadius: 3 }}>
+                {REVIEW_TONES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <span style={{ color: 'var(--text-muted)' }}>(profile + 5 seeded reviews + analysis report)</span>
+            </span>
+          )}
+        </div>
+      )}
+
       {!ready && health && (
         <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginBottom: 8 }}>
           Not ready — check DB connectivity and that MIRROR_INTERNAL_SECRET / JWT_SECRET are configured on mirror-server.
@@ -967,6 +1032,20 @@ function IntakeSimulationCard({ onUsersChanged }: { onUsersChanged?: () => void 
               <p style={{ color: 'var(--text-muted)', fontSize: 11, margin: '8px 0 0' }}>
                 Shown here only — never stored in run history or logs. The account is kept (email-verified, intake complete) until you Sweep orphans.
               </p>
+            </div>
+          )}
+
+          {report.truthCard && (
+            <div className="card" style={{ marginBottom: 12 }}>
+              <div className="card-header"><span className="card-title">TruthStream report card</span></div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-secondary)' }}>
+                profile created (goal: {report.truthCard.goalCategory || '—'}) · {report.truthCard.reviewsSeeded} reviews seeded from helper sim users · analysis report {report.truthCard.analysisRequested ? 'requested (async — generated by the TruthStream worker)' : 'not requested'}
+              </div>
+              {report.truthCard.helperUserIds.length > 0 && (
+                <p style={{ color: 'var(--text-muted)', fontSize: 11, margin: '6px 0 0' }}>
+                  Helper reviewer sim users #{report.truthCard.helperUserIds.join(', #')} were created and appear in Test Users (sweepable like any sim user).
+                </p>
+              )}
             </div>
           )}
 
@@ -1062,6 +1141,76 @@ function CredentialsBox({ c }: { c: { email: string; username: string; password:
   );
 }
 
+// Colour for a Dina review classification.
+function classColor(c: string | null): string {
+  switch (c) {
+    case 'constructive': return 'var(--accent-green)';
+    case 'affirming': return 'var(--accent-blue)';
+    case 'raw_truth': return 'var(--accent-yellow)';
+    case 'hostile': return 'var(--accent-red)';
+    default: return 'var(--text-muted)';
+  }
+}
+
+// The user's TruthStream report card + reviews + analysis, for the Inspect view.
+function TruthStreamDetail({ r }: { r: TruthStreamUserReport }) {
+  if (!r.hasProfile || !r.profile) {
+    return <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>No TruthStream profile.</div>;
+  }
+  const p = r.profile;
+  const generating = r.pendingJobs.some(j => j.jobType === 'generate_analysis');
+  const classifying = r.pendingJobs.filter(j => j.jobType === 'classify_review').length;
+  return (
+    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.6, marginTop: 8 }}>
+      <div style={{ color: 'var(--text-secondary)', fontWeight: 600, marginBottom: 4 }}>TruthStream report card</div>
+      <div style={{ color: 'var(--text-muted)' }}>
+        alias <span style={{ color: 'var(--accent-white)' }}>{p.displayAlias}</span> · goal {p.goalCategory} · {p.isActive ? 'active' : 'inactive'}
+        {' · '}received {p.totalReviewsReceived} · given {p.totalReviewsGiven}
+        {p.profileCompleteness != null ? ` · completeness ${p.profileCompleteness}` : ''}
+      </div>
+
+      <div style={{ marginTop: 6 }}>
+        report:{' '}
+        {r.analysis ? (
+          <span style={{ color: 'var(--accent-green)' }}>
+            {r.analysis.analysisType} generated from {r.analysis.reviewCountAtGeneration} reviews
+            {r.analysis.confidenceLevel != null ? ` (confidence ${r.analysis.confidenceLevel})` : ''}
+          </span>
+        ) : (
+          <span style={{ color: 'var(--text-muted)' }}>
+            not generated yet — needs {r.minReviewsForAnalysis} received reviews, has {p.totalReviewsReceived}
+            {generating ? ' · generating…' : ''}
+          </span>
+        )}
+      </div>
+      {r.analysis?.summary && (
+        <div style={{ color: 'var(--text-muted)', marginTop: 2, whiteSpace: 'pre-wrap', maxHeight: 160, overflowY: 'auto' }}>{r.analysis.summary}</div>
+      )}
+
+      <div style={{ marginTop: 6, color: 'var(--text-secondary)' }}>
+        Received reviews ({r.receivedReviews.length}){classifying > 0 ? <span style={{ color: 'var(--accent-yellow)' }}> · {classifying} classifying…</span> : null}
+      </div>
+      {r.receivedReviews.map(rv => (
+        <div key={rv.id}>
+          &nbsp;&nbsp;• <span style={{ color: classColor(rv.classification) }}>{rv.classification || 'classification pending'}</span>
+          {rv.classificationConfidence != null ? ` (${rv.classificationConfidence})` : ''}
+          {' · '}q{rv.qualityScore ?? '—'} · tone {rv.tone || '—'}
+          {rv.snippet ? <span style={{ color: 'var(--text-muted)' }}> — “{rv.snippet}”</span> : null}
+        </div>
+      ))}
+
+      {r.givenReviews.length > 0 && (
+        <>
+          <div style={{ marginTop: 6, color: 'var(--text-secondary)' }}>Given reviews ({r.givenReviews.length})</div>
+          {r.givenReviews.map(gv => (
+            <div key={gv.id}>&nbsp;&nbsp;• → user #{gv.revieweeId} · <span style={{ color: classColor(gv.classification) }}>{gv.classification || 'pending'}</span> · q{gv.qualityScore ?? '—'}</div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 const tuBtn: CSSProperties = { padding: '4px 10px', fontSize: 11, marginRight: 6 };
 
 // Manage kept simulation users: log in as them (reset password), inspect their
@@ -1072,6 +1221,7 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
   const [note, setNote] = useState('');
   const [busyId, setBusyId] = useState<number | null>(null);
   const [verify, setVerify] = useState<Record<number, PurgeVerification>>({});
+  const [tsReport, setTsReport] = useState<Record<number, TruthStreamUserReport>>({});
   const [creds, setCreds] = useState<Record<number, { email: string; username: string; password: string }>>({});
   const [deletions, setDeletions] = useState<Record<number, DeleteSimUserResult>>({});
 
@@ -1088,8 +1238,14 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
   const inspect = useCallback(async (id: number) => {
     setBusyId(id); setNote('');
     try {
-      const d = await api<{ data: PurgeVerification }>(`/mirror/simulation/users/${id}/verify`);
-      setVerify(v => ({ ...v, [id]: d.data }));
+      // Footprint (purge proof) + TruthStream report card, in parallel. The
+      // TruthStream read is best-effort — a missing report shouldn't block Inspect.
+      const [v, ts] = await Promise.all([
+        api<{ data: PurgeVerification }>(`/mirror/simulation/users/${id}/verify`),
+        api<{ data: TruthStreamUserReport }>(`/mirror/simulation/users/${id}/truthstream`).catch(() => null),
+      ]);
+      setVerify(prev => ({ ...prev, [id]: v.data }));
+      if (ts && ts.data) setTsReport(prev => ({ ...prev, [id]: ts.data }));
     } catch (e) { setNote((e as Error).message || 'Inspect failed'); }
     finally { setBusyId(null); }
   }, []);
@@ -1115,6 +1271,7 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
       const d = await api<{ data: DeleteSimUserResult }>(`/mirror/simulation/users/${id}`, { method: 'DELETE' });
       setDeletions(r => ({ ...r, [id]: d.data }));
       setVerify(v => { const n = { ...v }; delete n[id]; return n; });
+      setTsReport(t => { const n = { ...t }; delete n[id]; return n; });
       setCreds(c => { const n = { ...c }; delete n[id]; return n; });
       setNote(d.data.verification.clean
         ? `User #${id} deleted and verified — nothing remains.`
@@ -1167,11 +1324,12 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
                       <button className="nav-tab" style={{ ...tuBtn, color: 'var(--accent-red)', borderColor: 'var(--accent-red)' }} disabled={busyId === u.id} onClick={() => del(u.id, u.email)}>Delete</button>
                     </td>
                   </tr>
-                  {(creds[u.id] || verify[u.id]) && (
+                  {(creds[u.id] || verify[u.id] || tsReport[u.id]) && (
                     <tr>
                       <td colSpan={6} style={{ background: 'var(--bg-secondary)' }}>
                         {creds[u.id] && <CredentialsBox c={creds[u.id]} />}
                         {verify[u.id] && <VerificationDetail v={verify[u.id]} deleted={false} />}
+                        {tsReport[u.id] && <TruthStreamDetail r={tsReport[u.id]} />}
                       </td>
                     </tr>
                   )}
@@ -1195,6 +1353,160 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
               <VerificationDetail v={r.verification} deleted={true} />
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Simulate a TruthStream review: a sim reviewer reviews a chosen user (sim or real).
+function ReviewRunnerPanel({ refreshKey }: { refreshKey: number }) {
+  const [users, setUsers] = useState<ReviewableUser[]>([]);
+  const [reviewerId, setReviewerId] = useState('');
+  const [revieweeMode, setRevieweeMode] = useState<'sim' | 'search'>('sim');
+  const [revieweeId, setRevieweeId] = useState('');
+  const [searchQ, setSearchQ] = useState('');
+  const [searchResults, setSearchResults] = useState<ReviewableUser[]>([]);
+  const [searchSel, setSearchSel] = useState<ReviewableUser | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [tone, setTone] = useState(REVIEW_TONES[1]);
+  const [running, setRunning] = useState(false);
+  const [note, setNote] = useState('');
+  const [result, setResult] = useState<TargetedReviewResult | null>(null);
+
+  const loadUsers = useCallback(() => {
+    api<{ data: ReviewableUser[] }>('/mirror/simulation/reviewable-users')
+      .then(d => setUsers(d.data || []))
+      .catch(e => setNote((e as Error).message || 'Failed to load users'));
+  }, []);
+  useEffect(() => { loadUsers(); }, [loadUsers, refreshKey]);
+
+  const doSearch = useCallback(async () => {
+    if (searchQ.trim().length < 2) { setNote('Enter at least 2 characters to search.'); return; }
+    setSearching(true); setNote('');
+    try {
+      const d = await api<{ data: ReviewableUser[] }>(`/mirror/simulation/user-search?q=${encodeURIComponent(searchQ.trim())}`);
+      setSearchResults(d.data || []);
+      if ((d.data || []).length === 0) setNote('No users matched.');
+    } catch (e) { setNote((e as Error).message || 'Search failed'); }
+    finally { setSearching(false); }
+  }, [searchQ]);
+
+  const run = useCallback(async () => {
+    const reviewer = users.find(u => u.id === Number(reviewerId));
+    const reviewee = revieweeMode === 'sim' ? users.find(u => u.id === Number(revieweeId)) : (searchSel || undefined);
+    if (!reviewer) { setNote('Pick a reviewer (a sim user).'); return; }
+    if (!reviewee) { setNote('Pick a reviewee.'); return; }
+    if (reviewer.id === reviewee.id) { setNote('Reviewer and reviewee must be different users.'); return; }
+    if (!reviewee.isSim) {
+      if (!reviewee.hasProfile) { setNote(`${reviewee.email} is a real user with no TruthStream profile — cannot review them.`); return; }
+      if (!window.confirm(`⚠ ${reviewee.email} (#${reviewee.id}) is a REAL user, not a sim account.\n\nThis writes a real review to their account: it increments their received-review stats, queues a Dina classification/analysis, and may notify them. It is NOT auto-sweepable for a real user.\n\nProceed?`)) return;
+    }
+    setRunning(true); setNote(''); setResult(null);
+    try {
+      const d = await api<{ data: TargetedReviewResult }>('/mirror/simulation/reviews/run', {
+        method: 'POST', body: JSON.stringify({ reviewerId: reviewer.id, revieweeId: reviewee.id, tone }),
+      });
+      setResult(d.data);
+    } catch (e) { setNote((e as Error).message || 'Review run failed'); }
+    finally { setRunning(false); loadUsers(); }
+  }, [users, reviewerId, revieweeMode, revieweeId, searchSel, tone, loadUsers]);
+
+  const selStyle: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 12, padding: '6px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)', borderRadius: 3 };
+  const fmt = (n: number | null) => (n == null ? '—' : String(n));
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-header">
+        <span className="card-title">Review Runner — simulate a TruthStream review</span>
+        <button className="nav-tab" onClick={loadUsers} disabled={running} style={{ padding: '6px 12px', fontSize: 11 }}>Refresh</button>
+      </div>
+      <p style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 0 }}>
+        A sim user (reviewer) reviews a chosen user (reviewee) through the real start/complete pipeline. The reviewer is always a sim account; the reviewee may be a sim or real user.
+      </p>
+
+      <div style={{ display: 'grid', gap: 10 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
+          <span style={{ width: 80 }}>Reviewer</span>
+          <select value={reviewerId} onChange={e => setReviewerId(e.target.value)} disabled={running} style={{ ...selStyle, minWidth: 300 }}>
+            <option value="">— select a sim user —</option>
+            {users.map(u => <option key={u.id} value={u.id}>#{u.id} {u.email}{u.hasProfile ? ' ✓profile' : ''}</option>)}
+          </select>
+        </label>
+
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
+          <span style={{ width: 80, paddingTop: 6 }}>Reviewee</span>
+          <div style={{ display: 'grid', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="radio" checked={revieweeMode === 'sim'} onChange={() => setRevieweeMode('sim')} disabled={running} /> sim user
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="radio" checked={revieweeMode === 'search'} onChange={() => setRevieweeMode('search')} disabled={running} /> search any user
+              </label>
+            </div>
+            {revieweeMode === 'sim' ? (
+              <select value={revieweeId} onChange={e => setRevieweeId(e.target.value)} disabled={running} style={{ ...selStyle, minWidth: 300 }}>
+                <option value="">— select a sim user —</option>
+                {users.map(u => <option key={u.id} value={u.id}>#{u.id} {u.email}{u.hasProfile ? ' ✓profile' : ''}</option>)}
+              </select>
+            ) : (
+              <div style={{ display: 'grid', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input value={searchQ} onChange={e => setSearchQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') doSearch(); }} disabled={running}
+                    placeholder="email, username, or id" style={{ ...selStyle, minWidth: 260 }} />
+                  <button className="nav-tab" onClick={doSearch} disabled={running || searching} style={{ padding: '4px 12px', fontSize: 11 }}>{searching ? '…' : 'Search'}</button>
+                </div>
+                {searchSel && (
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                    selected: <span style={{ color: 'var(--accent-white)' }}>#{searchSel.id} {searchSel.email}</span>{' '}
+                    {searchSel.isSim ? <span style={{ color: 'var(--accent-green)' }}>(sim)</span> : <span style={{ color: 'var(--accent-red)' }}>(REAL USER)</span>}
+                    {!searchSel.hasProfile && <span style={{ color: 'var(--accent-yellow)' }}> · no profile</span>}
+                  </div>
+                )}
+                {searchResults.length > 0 && (
+                  <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 3 }}>
+                    {searchResults.map(u => (
+                      <div key={u.id} onClick={() => setSearchSel(u)} style={{ padding: '5px 8px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, borderBottom: '1px solid var(--border)', background: searchSel?.id === u.id ? 'var(--bg-secondary)' : 'transparent' }}>
+                        #{u.id} {u.email} {u.isSim ? <span style={{ color: 'var(--accent-green)' }}>sim</span> : <span style={{ color: 'var(--accent-red)' }}>REAL</span>}{u.hasProfile ? ' ✓profile' : ''}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+          <span style={{ width: 80 }}>Tone</span>
+          <select value={tone} onChange={e => setTone(e.target.value)} disabled={running} style={selStyle}>
+            {REVIEW_TONES.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+
+        <div>
+          <button className="nav-tab" onClick={run} disabled={running}
+            style={{ padding: '8px 18px', border: '1px solid var(--accent-green)', borderRadius: 4, color: running ? 'var(--text-muted)' : 'var(--accent-green)' }}>
+            {running ? 'Running…' : 'Run Review'}
+          </button>
+        </div>
+      </div>
+
+      {note && <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginTop: 8, fontFamily: 'var(--font-mono)' }}>{note}</div>}
+
+      {result && (
+        <div className="card" style={{ marginTop: 12, borderColor: result.reviewId ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, display: 'grid', gap: 3 }}>
+            <div style={{ color: result.reviewId ? 'var(--accent-green)' : 'var(--accent-yellow)', fontWeight: 600 }}>
+              {result.reviewId ? 'Review submitted ✓' : 'Review run completed'}
+            </div>
+            <div>reviewer #{result.reviewerId} → reviewee #{result.revieweeId} {result.revieweeIsSim ? <span style={{ color: 'var(--accent-green)' }}>(sim)</span> : <span style={{ color: 'var(--accent-red)' }}>(REAL USER)</span>}</div>
+            <div style={{ color: 'var(--text-muted)' }}>tone: {result.tone} · questionnaire: {result.goalCategory}</div>
+            <div style={{ color: 'var(--text-muted)' }}>scores — quality {fmt(result.qualityScore)} · completeness {fmt(result.completenessScore)} · depth {fmt(result.depthScore)}</div>
+            <div style={{ color: 'var(--text-muted)' }}>classification: {result.classificationPending ? 'pending (async — TruthStream worker + Dina)' : 'done'}</div>
+            {result.reviewId && <div style={{ color: 'var(--text-muted)' }}>reviewId: <span style={{ userSelect: 'all' }}>{result.reviewId}</span></div>}
+          </div>
         </div>
       )}
     </div>
@@ -1255,6 +1567,8 @@ function MirrorPanel() {
       <IntakeSimulationCard onUsersChanged={() => setSimUsersRefresh(k => k + 1)} />
 
       <TestUsersPanel refreshKey={simUsersRefresh} />
+
+      <ReviewRunnerPanel refreshKey={simUsersRefresh} />
 
       {features && (
         <div className="card" style={{ marginBottom: 16 }}>
