@@ -1227,6 +1227,7 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
   const [tsReport, setTsReport] = useState<Record<number, TruthStreamUserReport>>({});
   const [creds, setCreds] = useState<Record<number, { email: string; username: string; password: string }>>({});
   const [deletions, setDeletions] = useState<Record<number, DeleteSimUserResult>>({});
+  const [grantId, setGrantId] = useState('');
 
   const load = useCallback(() => {
     setLoading(true);
@@ -1284,13 +1285,40 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
     finally { setBusyId(null); }
   }, [load]);
 
+  // (Re-)assert ACTIVE premium for a user and bust the subscription cache. Fixes
+  // a user the gate reports as free/cancelled (premium-gated features 403).
+  const grantPremium = useCallback(async (id: number) => {
+    setBusyId(id); setNote('');
+    try {
+      const d = await api<{ data: { userId: number; tier: string; status: string } }>(`/mirror/simulation/users/${id}/premium`, { method: 'POST' });
+      setNote(`User #${id}: subscription now ${d.data.tier}/${d.data.status} — cache cleared, premium-gated features should work immediately.`);
+      load();
+    } catch (e) { setNote((e as Error).message || 'Grant premium failed'); }
+    finally { setBusyId(null); }
+  }, [load]);
+
+  const grantPremiumById = useCallback(async () => {
+    const id = parseInt(grantId, 10);
+    if (!Number.isInteger(id) || id <= 0) { setNote('Enter a valid numeric user id to grant premium.'); return; }
+    const inSimList = users.some(u => u.id === id);
+    if (!inSimList && !window.confirm(`User #${id} is not in the sim-user list — it may be a REAL account.\n\nGrant it permanent active premium anyway?`)) return;
+    await grantPremium(id);
+    setGrantId('');
+  }, [grantId, users, grantPremium]);
+
   return (
     <div className="card" style={{ marginBottom: 16 }}>
       <div className="card-header">
         <span className="card-title">Test Users — kept simulations</span>
-        <button className="nav-tab" onClick={load} disabled={loading} style={{ padding: '6px 12px', fontSize: 11 }}>
-          {loading ? 'Loading…' : 'Refresh'}
-        </button>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+          <input value={grantId} onChange={e => setGrantId(e.target.value)} placeholder="user id"
+            onKeyDown={e => { if (e.key === 'Enter') grantPremiumById(); }}
+            style={{ width: 80, fontFamily: 'var(--font-mono)', fontSize: 11, padding: '5px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)', borderRadius: 3 }} />
+          <button className="nav-tab" onClick={grantPremiumById} style={{ padding: '6px 12px', fontSize: 11 }}>Grant premium</button>
+          <button className="nav-tab" onClick={load} disabled={loading} style={{ padding: '6px 12px', fontSize: 11 }}>
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+        </span>
       </div>
 
       {note && <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginBottom: 8, fontFamily: 'var(--font-mono)' }}>{note}</div>}
@@ -1323,6 +1351,7 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{u.files.tier1}/{u.files.tier2}/{u.files.tier3}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>
                       <button className="nav-tab" style={tuBtn} disabled={busyId === u.id} onClick={() => inspect(u.id)}>Inspect</button>
+                      <button className="nav-tab" style={tuBtn} disabled={busyId === u.id} onClick={() => grantPremium(u.id)}>Premium</button>
                       <button className="nav-tab" style={tuBtn} disabled={busyId === u.id} onClick={() => resetPw(u.id)}>Reset PW</button>
                       <button className="nav-tab" style={{ ...tuBtn, color: 'var(--accent-red)', borderColor: 'var(--accent-red)' }} disabled={busyId === u.id} onClick={() => del(u.id, u.email)}>Delete</button>
                     </td>

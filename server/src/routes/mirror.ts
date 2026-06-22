@@ -153,6 +153,16 @@ mirrorRouter.get('/simulation/users/:id/verify', async (req, res) => {
   }
 });
 
+// POST /admin/api/mirror/simulation/users/:id/premium — (re-)assert active premium
+mirrorRouter.post('/simulation/users/:id/premium', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('POST', `/intake/users/${encodeURIComponent(req.params.id)}/premium`, {}, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to grant premium' });
+  }
+});
+
 // GET /admin/api/mirror/simulation/users/:id/truthstream — card + reviews + report
 mirrorRouter.get('/simulation/users/:id/truthstream', async (req, res) => {
   try {
