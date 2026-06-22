@@ -797,16 +797,19 @@ interface ReviewableUser {
   id: number; username: string; email: string;
   isSim: boolean; hasProfile: boolean; goalCategory: string | null;
 }
-interface TargetedReviewResult {
-  reviewId: string | null; reviewerId: number; revieweeId: number; revieweeIsSim: boolean;
-  tone: string; goalCategory: string;
-  qualityScore: number | null; completenessScore: number | null; depthScore: number | null;
-  classificationPending: boolean;
-}
 interface TruthStreamReviewSummary {
   id: string; classification: string | null; classificationConfidence: number | null;
   qualityScore: number | null; completenessScore: number | null; depthScore: number | null;
   tone: string | null; snippet: string | null; createdAt: string | null;
+}
+interface ProfiledUser {
+  id: number; username: string; email: string;
+  isSim: boolean; goalCategory: string | null; reviewsReceived: number; hasReport: boolean;
+}
+interface ReviewBatchResult {
+  revieweeId: number; revieweeIsSim: boolean; tone: string;
+  results: { reviewerId: number; ok: boolean; reviewId: string | null; qualityScore: number | null; error?: string }[];
+  succeeded: number; totalReceivedAfter: number; minReviewsForAnalysis: number; reportReady: boolean;
 }
 interface TruthStreamUserReport {
   hasProfile: boolean; minReviewsForAnalysis: number;
@@ -1359,127 +1362,91 @@ function TestUsersPanel({ refreshKey }: { refreshKey: number }) {
   );
 }
 
-// Simulate a TruthStream review: a sim reviewer reviews a chosen user (sim or real).
+// Simulate TruthStream reviews: one or more sim reviewers review a chosen user.
 function ReviewRunnerPanel({ refreshKey }: { refreshKey: number }) {
-  const [users, setUsers] = useState<ReviewableUser[]>([]);
-  const [reviewerId, setReviewerId] = useState('');
-  const [revieweeMode, setRevieweeMode] = useState<'sim' | 'search'>('sim');
+  const [reviewers, setReviewers] = useState<ReviewableUser[]>([]);
+  const [reviewees, setReviewees] = useState<ProfiledUser[]>([]);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [addHelpers, setAddHelpers] = useState('0');
   const [revieweeId, setRevieweeId] = useState('');
-  const [searchQ, setSearchQ] = useState('');
-  const [searchResults, setSearchResults] = useState<ReviewableUser[]>([]);
-  const [searchSel, setSearchSel] = useState<ReviewableUser | null>(null);
-  const [searching, setSearching] = useState(false);
   const [tone, setTone] = useState(REVIEW_TONES[1]);
   const [running, setRunning] = useState(false);
   const [note, setNote] = useState('');
-  const [result, setResult] = useState<TargetedReviewResult | null>(null);
+  const [result, setResult] = useState<ReviewBatchResult | null>(null);
 
-  const loadUsers = useCallback(() => {
-    api<{ data: ReviewableUser[] }>('/mirror/simulation/reviewable-users')
-      .then(d => setUsers(d.data || []))
-      .catch(e => setNote((e as Error).message || 'Failed to load users'));
+  const load = useCallback(() => {
+    api<{ data: ReviewableUser[] }>('/mirror/simulation/reviewable-users').then(d => setReviewers(d.data || [])).catch(e => setNote((e as Error).message || 'Failed to load reviewers'));
+    api<{ data: ProfiledUser[] }>('/mirror/simulation/users-with-profile').then(d => setReviewees(d.data || [])).catch(e => setNote((e as Error).message || 'Failed to load reviewees'));
   }, []);
-  useEffect(() => { loadUsers(); }, [loadUsers, refreshKey]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
-  const doSearch = useCallback(async () => {
-    if (searchQ.trim().length < 2) { setNote('Enter at least 2 characters to search.'); return; }
-    setSearching(true); setNote('');
-    try {
-      const d = await api<{ data: ReviewableUser[] }>(`/mirror/simulation/user-search?q=${encodeURIComponent(searchQ.trim())}`);
-      setSearchResults(d.data || []);
-      if ((d.data || []).length === 0) setNote('No users matched.');
-    } catch (e) { setNote((e as Error).message || 'Search failed'); }
-    finally { setSearching(false); }
-  }, [searchQ]);
+  const toggle = (id: number) => setSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   const run = useCallback(async () => {
-    const reviewer = users.find(u => u.id === Number(reviewerId));
-    const reviewee = revieweeMode === 'sim' ? users.find(u => u.id === Number(revieweeId)) : (searchSel || undefined);
-    if (!reviewer) { setNote('Pick a reviewer (a sim user).'); return; }
-    if (!reviewee) { setNote('Pick a reviewee.'); return; }
-    if (reviewer.id === reviewee.id) { setNote('Reviewer and reviewee must be different users.'); return; }
-    if (!reviewee.isSim) {
-      if (!reviewee.hasProfile) { setNote(`${reviewee.email} is a real user with no TruthStream profile — cannot review them.`); return; }
-      if (!window.confirm(`⚠ ${reviewee.email} (#${reviewee.id}) is a REAL user, not a sim account.\n\nThis writes a real review to their account: it increments their received-review stats, queues a Dina classification/analysis, and may notify them. It is NOT auto-sweepable for a real user.\n\nProceed?`)) return;
-    }
+    const reviewee = reviewees.find(u => u.id === Number(revieweeId));
+    const helpers = Math.max(0, Math.min(10, parseInt(addHelpers, 10) || 0));
+    if (!reviewee) { setNote('Pick a reviewee (a user with a TruthStream report).'); return; }
+    const reviewerIds = Array.from(selected).filter(id => id !== reviewee.id);
+    if (reviewerIds.length === 0 && helpers === 0) { setNote('Select at least one reviewer, or add helper reviewers.'); return; }
+    if (!reviewee.isSim && !window.confirm(`⚠ ${reviewee.email} (#${reviewee.id}) is a REAL user, not a sim account.\n\nThis writes ${reviewerIds.length + helpers} real review(s) to their account (received-review stats, Dina classification/analysis, possible notification) and is NOT auto-sweepable for a real user.\n\nProceed?`)) return;
     setRunning(true); setNote(''); setResult(null);
     try {
-      const d = await api<{ data: TargetedReviewResult }>('/mirror/simulation/reviews/run', {
-        method: 'POST', body: JSON.stringify({ reviewerId: reviewer.id, revieweeId: reviewee.id, tone }),
+      const d = await api<{ data: ReviewBatchResult }>('/mirror/simulation/reviews/run-batch', {
+        method: 'POST', body: JSON.stringify({ revieweeId: reviewee.id, reviewerIds, addHelpers: helpers, tone }),
       });
       setResult(d.data);
-    } catch (e) { setNote((e as Error).message || 'Review run failed'); }
-    finally { setRunning(false); loadUsers(); }
-  }, [users, reviewerId, revieweeMode, revieweeId, searchSel, tone, loadUsers]);
+    } catch (e) { setNote((e as Error).message || 'Review batch failed'); }
+    finally { setRunning(false); load(); }
+  }, [reviewees, revieweeId, selected, addHelpers, tone, load]);
 
   const selStyle: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 12, padding: '6px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)', borderRadius: 3 };
-  const fmt = (n: number | null) => (n == null ? '—' : String(n));
 
   return (
     <div className="card" style={{ marginBottom: 16 }}>
       <div className="card-header">
-        <span className="card-title">Review Runner — simulate a TruthStream review</span>
-        <button className="nav-tab" onClick={loadUsers} disabled={running} style={{ padding: '6px 12px', fontSize: 11 }}>Refresh</button>
+        <span className="card-title">Review Runner — simulate TruthStream reviews</span>
+        <button className="nav-tab" onClick={load} disabled={running} style={{ padding: '6px 12px', fontSize: 11 }}>Refresh</button>
       </div>
       <p style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 0 }}>
-        A sim user (reviewer) reviews a chosen user (reviewee) through the real start/complete pipeline. The reviewer is always a sim account; the reviewee may be a sim or real user.
+        One or more sim reviewers review a chosen user through the real start/complete pipeline. Reviewers are always sim accounts; the reviewee can be any user with a TruthStream report (sim or real). A user needs ≥5 received reviews before the mirror report can generate.
       </p>
 
-      <div style={{ display: 'grid', gap: 10 }}>
+      <div style={{ display: 'grid', gap: 12 }}>
+        {/* Reviewee — picked from the list of users that have a TruthStream report */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
-          <span style={{ width: 80 }}>Reviewer</span>
-          <select value={reviewerId} onChange={e => setReviewerId(e.target.value)} disabled={running} style={{ ...selStyle, minWidth: 300 }}>
-            <option value="">— select a sim user —</option>
-            {users.map(u => <option key={u.id} value={u.id}>#{u.id} {u.email}{u.hasProfile ? ' ✓profile' : ''}</option>)}
+          <span style={{ width: 90 }}>Reviewee</span>
+          <select value={revieweeId} onChange={e => setRevieweeId(e.target.value)} disabled={running} style={{ ...selStyle, minWidth: 380 }}>
+            <option value="">— pick a user with a TruthStream report —</option>
+            {reviewees.map(u => (
+              <option key={u.id} value={u.id}>#{u.id} {u.email} {u.isSim ? '[sim]' : '[REAL]'} · {u.reviewsReceived} received{u.hasReport ? ' · report✓' : ''}</option>
+            ))}
           </select>
         </label>
 
+        {/* Reviewers — multi-select sim users + optional fresh helpers */}
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
-          <span style={{ width: 80, paddingTop: 6 }}>Reviewee</span>
+          <span style={{ width: 90, paddingTop: 6 }}>Reviewers</span>
           <div style={{ display: 'grid', gap: 6 }}>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <input type="radio" checked={revieweeMode === 'sim'} onChange={() => setRevieweeMode('sim')} disabled={running} /> sim user
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <input type="radio" checked={revieweeMode === 'search'} onChange={() => setRevieweeMode('search')} disabled={running} /> search any user
-              </label>
+            <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 3, minWidth: 380 }}>
+              {reviewers.length === 0 ? (
+                <div style={{ padding: '6px 8px', color: 'var(--text-muted)', fontSize: 11 }}>No sim users yet — run a simulation (Keep) to create some, or just add helper reviewers below.</div>
+              ) : reviewers.map(u => (
+                <label key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', fontFamily: 'var(--font-mono)', fontSize: 11, borderBottom: '1px solid var(--border)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={selected.has(u.id)} onChange={() => toggle(u.id)} disabled={running} />
+                  #{u.id} {u.email}{u.hasProfile ? ' ✓profile' : ''}
+                </label>
+              ))}
             </div>
-            {revieweeMode === 'sim' ? (
-              <select value={revieweeId} onChange={e => setRevieweeId(e.target.value)} disabled={running} style={{ ...selStyle, minWidth: 300 }}>
-                <option value="">— select a sim user —</option>
-                {users.map(u => <option key={u.id} value={u.id}>#{u.id} {u.email}{u.hasProfile ? ' ✓profile' : ''}</option>)}
-              </select>
-            ) : (
-              <div style={{ display: 'grid', gap: 6 }}>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input value={searchQ} onChange={e => setSearchQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') doSearch(); }} disabled={running}
-                    placeholder="email, username, or id" style={{ ...selStyle, minWidth: 260 }} />
-                  <button className="nav-tab" onClick={doSearch} disabled={running || searching} style={{ padding: '4px 12px', fontSize: 11 }}>{searching ? '…' : 'Search'}</button>
-                </div>
-                {searchSel && (
-                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                    selected: <span style={{ color: 'var(--accent-white)' }}>#{searchSel.id} {searchSel.email}</span>{' '}
-                    {searchSel.isSim ? <span style={{ color: 'var(--accent-green)' }}>(sim)</span> : <span style={{ color: 'var(--accent-red)' }}>(REAL USER)</span>}
-                    {!searchSel.hasProfile && <span style={{ color: 'var(--accent-yellow)' }}> · no profile</span>}
-                  </div>
-                )}
-                {searchResults.length > 0 && (
-                  <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 3 }}>
-                    {searchResults.map(u => (
-                      <div key={u.id} onClick={() => setSearchSel(u)} style={{ padding: '5px 8px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, borderBottom: '1px solid var(--border)', background: searchSel?.id === u.id ? 'var(--bg-secondary)' : 'transparent' }}>
-                        #{u.id} {u.email} {u.isSim ? <span style={{ color: 'var(--accent-green)' }}>sim</span> : <span style={{ color: 'var(--accent-red)' }}>REAL</span>}{u.hasProfile ? ' ✓profile' : ''}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ color: 'var(--text-muted)' }}>{selected.size} selected · + auto-add</span>
+              <input type="number" min={0} max={10} value={addHelpers} onChange={e => setAddHelpers(e.target.value)} disabled={running} style={{ ...selStyle, width: 64 }} />
+              <span style={{ color: 'var(--text-muted)' }}>fresh helper reviewers</span>
+            </label>
           </div>
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
-          <span style={{ width: 80 }}>Tone</span>
+          <span style={{ width: 90 }}>Tone</span>
           <select value={tone} onChange={e => setTone(e.target.value)} disabled={running} style={selStyle}>
             {REVIEW_TONES.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
@@ -1488,7 +1455,7 @@ function ReviewRunnerPanel({ refreshKey }: { refreshKey: number }) {
         <div>
           <button className="nav-tab" onClick={run} disabled={running}
             style={{ padding: '8px 18px', border: '1px solid var(--accent-green)', borderRadius: 4, color: running ? 'var(--text-muted)' : 'var(--accent-green)' }}>
-            {running ? 'Running…' : 'Run Review'}
+            {running ? 'Running…' : 'Run Reviews'}
           </button>
         </div>
       </div>
@@ -1496,16 +1463,21 @@ function ReviewRunnerPanel({ refreshKey }: { refreshKey: number }) {
       {note && <div style={{ color: 'var(--accent-yellow)', fontSize: 12, marginTop: 8, fontFamily: 'var(--font-mono)' }}>{note}</div>}
 
       {result && (
-        <div className="card" style={{ marginTop: 12, borderColor: result.reviewId ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>
+        <div className="card" style={{ marginTop: 12, borderColor: result.succeeded > 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, display: 'grid', gap: 3 }}>
-            <div style={{ color: result.reviewId ? 'var(--accent-green)' : 'var(--accent-yellow)', fontWeight: 600 }}>
-              {result.reviewId ? 'Review submitted ✓' : 'Review run completed'}
+            <div style={{ color: result.succeeded > 0 ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: 600 }}>
+              {result.succeeded}/{result.results.length} reviews submitted to reviewee #{result.revieweeId} {result.revieweeIsSim ? <span style={{ color: 'var(--accent-green)' }}>(sim)</span> : <span style={{ color: 'var(--accent-red)' }}>(REAL USER)</span>}
             </div>
-            <div>reviewer #{result.reviewerId} → reviewee #{result.revieweeId} {result.revieweeIsSim ? <span style={{ color: 'var(--accent-green)' }}>(sim)</span> : <span style={{ color: 'var(--accent-red)' }}>(REAL USER)</span>}</div>
-            <div style={{ color: 'var(--text-muted)' }}>tone: {result.tone} · questionnaire: {result.goalCategory}</div>
-            <div style={{ color: 'var(--text-muted)' }}>scores — quality {fmt(result.qualityScore)} · completeness {fmt(result.completenessScore)} · depth {fmt(result.depthScore)}</div>
-            <div style={{ color: 'var(--text-muted)' }}>classification: {result.classificationPending ? 'pending (async — TruthStream worker + Dina)' : 'done'}</div>
-            {result.reviewId && <div style={{ color: 'var(--text-muted)' }}>reviewId: <span style={{ userSelect: 'all' }}>{result.reviewId}</span></div>}
+            <div style={{ color: 'var(--text-muted)' }}>tone: {result.tone}</div>
+            <div style={{ color: result.reportReady ? 'var(--accent-green)' : 'var(--accent-yellow)' }}>
+              received reviews: {result.totalReceivedAfter} / {result.minReviewsForAnalysis} needed — {result.reportReady ? 'report can generate ✓' : 'need more before the report can generate'}
+            </div>
+            {result.results.map((r, i) => (
+              <div key={i} style={{ color: r.ok ? 'var(--text-muted)' : 'var(--accent-red)' }}>
+                &nbsp;&nbsp;• reviewer {r.reviewerId > 0 ? `#${r.reviewerId}` : '(helper)'}: {r.ok ? `ok · q${r.qualityScore ?? '—'}` : `failed — ${r.error || 'unknown'}`}
+              </div>
+            ))}
+            <div style={{ color: 'var(--text-muted)' }}>classification + report run asynchronously (TruthStream worker + Dina). Use Inspect on the reviewee to watch them populate.</div>
           </div>
         </div>
       )}

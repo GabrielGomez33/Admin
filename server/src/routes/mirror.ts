@@ -223,3 +223,29 @@ mirrorRouter.post('/simulation/reviews/run', async (req, res) => {
     res.status(502).json({ success: false, error: (error as Error).message || 'Failed to run review' });
   }
 });
+
+// GET /admin/api/mirror/simulation/users-with-profile — reviewee pool (sim/real)
+mirrorRouter.get('/simulation/users-with-profile', async (req, res) => {
+  try {
+    const r = await mirrorSimRequest('GET', '/intake/users-with-profile', undefined, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to list users with a profile' });
+  }
+});
+
+// POST /admin/api/mirror/simulation/reviews/run-batch — many reviewers -> 1 reviewee
+mirrorRouter.post('/simulation/reviews/run-batch', async (req, res) => {
+  try {
+    const body = {
+      revieweeId: Number(req.body?.revieweeId),
+      reviewerIds: Array.isArray(req.body?.reviewerIds) ? req.body.reviewerIds.map((n: unknown) => Number(n)) : [],
+      addHelpers: Number(req.body?.addHelpers) || 0,
+      tone: typeof req.body?.tone === 'string' ? req.body.tone : undefined,
+    };
+    const r = await mirrorSimRequest('POST', '/intake/reviews/run-batch', body, operatorOf(req));
+    res.status(r.status).json(r.body);
+  } catch (error) {
+    res.status(502).json({ success: false, error: (error as Error).message || 'Failed to run review batch' });
+  }
+});
