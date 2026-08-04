@@ -47,6 +47,15 @@ emailRouter.get('/users/search', (req, res) => {
   return forward(req, res, 'GET', `/users/search?q=${q}&limit=${limit}`);
 });
 
+// Read-only view of the marketing waitlist (counts-by-status + a page of rows),
+// so the operator can see the list and target it as a campaign audience.
+emailRouter.get('/waitlist', (req, res) => {
+  const status = encodeURIComponent(String(req.query.status || ''));
+  const limit = encodeURIComponent(String(req.query.limit || '100'));
+  const offset = encodeURIComponent(String(req.query.offset || '0'));
+  return forward(req, res, 'GET', `/waitlist?status=${status}&limit=${limit}&offset=${offset}`);
+});
+
 emailRouter.post('/preview-audience', (req, res) => forward(req, res, 'POST', '/preview-audience', req.body));
 emailRouter.post('/preview', (req, res) => forward(req, res, 'POST', '/preview', req.body));
 
