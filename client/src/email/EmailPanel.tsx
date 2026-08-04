@@ -51,9 +51,13 @@ interface Attachment {
 }
 
 type AudienceMode = 'all' | 'filter' | 'specific';
+type AudienceSource = 'users' | 'waitlist';
 
 interface AudienceFilter {
+  /** Which population this campaign targets. Absent = 'users' (back-compat). */
+  source?: AudienceSource;
   mode: AudienceMode;
+  // users-source selectors
   verifiedOnly?: boolean;
   intakeCompleted?: boolean;
   role?: string | null;
@@ -62,6 +66,18 @@ interface AudienceFilter {
   activeSince?: string;
   excludeLocked?: boolean;
   userIds?: number[];
+  // waitlist-source selectors
+  waitlistStatuses?: string[];
+  waitlistSource?: string | null;
+}
+
+// Waitlist lifecycle statuses eligible to receive an invitation campaign.
+const WAITLIST_SUBSCRIBABLE = ['pending', 'confirmed', 'invited'];
+
+interface WaitlistData {
+  total: number;
+  counts: Record<string, number>;
+  rows: { id: number; email: string; source: string; status: string; created_at: string }[];
 }
 
 interface UserHit {
@@ -192,7 +208,9 @@ function AudienceSelector({ audience, onChange }: { audience: AudienceFilter; on
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<UserHit[]>([]);
   const [selected, setSelected] = useState<UserHit[]>([]);
+  const [waitlist, setWaitlist] = useState<WaitlistData | null>(null);
   const set = (patch: Partial<AudienceFilter>) => onChange({ ...audience, ...patch });
+  const source: AudienceSource = audience.source === 'waitlist' ? 'waitlist' : 'users';
 
   const search = useCallback(async (q: string) => {
     if (q.trim().length < 2) { setHits([]); return; }
@@ -207,6 +225,17 @@ function AudienceSelector({ audience, onChange }: { audience: AudienceFilter; on
     return () => clearTimeout(id);
   }, [query, search]);
 
+  // Load waitlist composition (counts + a few recent rows) when that source is
+  // active, so the operator can see who they're about to invite.
+  useEffect(() => {
+    if (source !== 'waitlist') return;
+    let cancelled = false;
+    api<WaitlistData & { success: boolean }>('/email/waitlist?limit=8')
+      .then(d => { if (!cancelled) setWaitlist({ total: d.total, counts: d.counts, rows: d.rows }); })
+      .catch(() => { if (!cancelled) setWaitlist(null); });
+    return () => { cancelled = true; };
+  }, [source]);
+
   const addUser = (u: UserHit) => {
     if (selected.some(s => s.id === u.id)) return;
     const next = [...selected, u];
@@ -219,8 +248,73 @@ function AudienceSelector({ audience, onChange }: { audience: AudienceFilter; on
     set({ userIds: next.map(s => s.id) });
   };
 
+  // Switching source resets to that source's safe defaults so stale user-only
+  // or waitlist-only selectors never leak across.
+  const switchSource = (s: AudienceSource) => {
+    if (s === source) return;
+    if (s === 'waitlist') onChange({ source: 'waitlist', mode: 'all', waitlistStatuses: [...WAITLIST_SUBSCRIBABLE] });
+    else onChange({ source: 'users', mode: 'all', verifiedOnly: true, excludeLocked: true });
+  };
+
+  const activeStatuses = Array.isArray(audience.waitlistStatuses) && audience.waitlistStatuses.length
+    ? audience.waitlistStatuses
+    : WAITLIST_SUBSCRIBABLE;
+  const toggleStatus = (st: string) => {
+    const next = activeStatuses.includes(st)
+      ? activeStatuses.filter(x => x !== st)
+      : [...activeStatuses, st];
+    set({ waitlistStatuses: next });
+  };
+
   return (
     <div>
+      {/* Source toggle — registered users vs the marketing waitlist. */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {(['users', 'waitlist'] as AudienceSource[]).map(s => (
+          <button
+            key={s}
+            className={`nav-tab${source === s ? ' active' : ''}`}
+            style={{ padding: '4px 14px', fontSize: 11 }}
+            onClick={() => switchSource(s)}
+          >{s === 'users' ? 'Registered users' : 'Waitlist'}</button>
+        ))}
+      </div>
+
+      {source === 'waitlist' ? (
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
+            These are people who joined the <strong style={{ color: 'var(--text-secondary)' }}>waitlist</strong> — not account holders.
+            They receive an invitation, and their footer accurately says "you joined the Mirror waitlist."
+            Unsubscribed &amp; already-converted signups are never included.
+          </div>
+
+          <label style={labelStyle}>Include statuses</label>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 14 }}>
+            {WAITLIST_SUBSCRIBABLE.map(st => (
+              <label key={st} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--text-secondary)' }}>
+                <input type="checkbox" checked={activeStatuses.includes(st)} onChange={() => toggleStatus(st)} />
+                {st}{waitlist ? <span style={{ color: 'var(--text-muted)' }}> ({waitlist.counts[st] || 0})</span> : null}
+              </label>
+            ))}
+          </div>
+
+          <label style={labelStyle}>Signup source (optional)</label>
+          <input
+            style={inputStyle}
+            value={audience.waitlistSource || ''}
+            placeholder="e.g. landing (blank = any)"
+            onChange={e => set({ waitlistSource: e.target.value || null })}
+          />
+
+          {waitlist && (
+            <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+              <strong style={{ color: 'var(--text-secondary)' }}>{waitlist.total}</strong> total on the waitlist
+              {waitlist.rows.length > 0 && <> · recent: {waitlist.rows.slice(0, 5).map(r => r.email).join(', ')}</>}
+            </div>
+          )}
+        </div>
+      ) : (
+      <div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
         {(['all', 'filter', 'specific'] as AudienceMode[]).map(m => (
           <button
@@ -296,6 +390,8 @@ function AudienceSelector({ audience, onChange }: { audience: AudienceFilter; on
             {selected.length === 0 && <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>No users selected yet.</span>}
           </div>
         </div>
+      )}
+      </div>
       )}
     </div>
   );
@@ -412,13 +508,15 @@ export default function EmailPanel() {
     const id = setTimeout(async () => {
       try {
         const data = await api<{ html: string }>('/email/preview', {
-          method: 'POST', body: JSON.stringify({ subject, blocks }),
+          // Send the audience so the footer/consent line matches the target
+          // (waitlist invitation vs account holder) — not a users-only preview.
+          method: 'POST', body: JSON.stringify({ subject, blocks, audience }),
         });
         setPreviewHtml(data.html);
       } catch { /* preview is best-effort */ }
     }, 500);
     return () => clearTimeout(id);
-  }, [subject, blocks]);
+  }, [subject, blocks, audience]);
 
   const flash = (kind: 'ok' | 'err', text: string) => { setMsg({ kind, text }); setTimeout(() => setMsg(null), 6000); };
 
@@ -449,7 +547,7 @@ export default function EmailPanel() {
     if (!testEmail) { flash('err', 'Enter a test email address'); return; }
     setBusy(true); setMsg(null);
     try {
-      await api('/email/test', { method: 'POST', body: JSON.stringify({ title, subject, blocks, attachments, dryRun, testEmail }) });
+      await api('/email/test', { method: 'POST', body: JSON.stringify({ title, subject, blocks, attachments, dryRun, testEmail, audience }) });
       flash('ok', `Test sent to ${testEmail}`);
     } catch (e) { flash('err', (e as Error).message); }
     finally { setBusy(false); }
