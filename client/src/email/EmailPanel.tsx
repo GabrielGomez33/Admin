@@ -518,6 +518,21 @@ export default function EmailPanel() {
     return () => clearTimeout(id);
   }, [subject, blocks, audience]);
 
+  // Live recipient preview — auto-refreshes (debounced) whenever the audience
+  // changes, so the operator always sees exactly who the email will go to
+  // without clicking anything. Asks for a real list (up to 50), not 5 names.
+  useEffect(() => {
+    const id = setTimeout(async () => {
+      try {
+        const data = await api<AudiencePreview & { success: boolean }>('/email/preview-audience', {
+          method: 'POST', body: JSON.stringify({ audience, sampleLimit: 50 }),
+        });
+        setAudiencePreview({ total: data.total, suppressed: data.suppressed, sample: data.sample });
+      } catch { setAudiencePreview(null); }
+    }, 500);
+    return () => clearTimeout(id);
+  }, [audience]);
+
   const flash = (kind: 'ok' | 'err', text: string) => { setMsg({ kind, text }); setTimeout(() => setMsg(null), 6000); };
 
   const onFile = async (file: File) => {
@@ -530,17 +545,6 @@ export default function EmailPanel() {
       setAttachments(a => [...a, { filename: file.name, content: base64, contentType: file.type || undefined }]);
     };
     reader.readAsDataURL(file);
-  };
-
-  const checkAudience = async () => {
-    setBusy(true); setMsg(null);
-    try {
-      const data = await api<AudiencePreview & { success: boolean }>('/email/preview-audience', {
-        method: 'POST', body: JSON.stringify({ audience }),
-      });
-      setAudiencePreview({ total: data.total, suppressed: data.suppressed, sample: data.sample });
-    } catch (e) { flash('err', (e as Error).message); }
-    finally { setBusy(false); }
   };
 
   const sendTest = async () => {
@@ -612,12 +616,25 @@ export default function EmailPanel() {
           <div style={{ marginTop: 16 }}>
             <label style={labelStyle}>Attachments (optional, max 5MB total)</label>
             <input type="file" onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.currentTarget.value = ''; }} style={{ fontSize: 12, color: 'var(--text-secondary)' }} />
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
-              {attachments.map((a, i) => (
-                <span key={i} style={{ background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 3, padding: '2px 8px', fontSize: 11 }}>
-                  {a.filename} <span style={{ cursor: 'pointer', color: 'var(--accent-red)' }} onClick={() => setAttachments(att => att.filter((_, idx) => idx !== i))}>✕</span>
-                </span>
-              ))}
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+              Attached files are sent with the email — they don't appear in the body preview. To show an image inside the email, add an <strong>image block</strong> with its URL.
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+              {attachments.map((a, i) => {
+                const kb = Math.max(1, Math.round((a.content.length * 3 / 4) / 1024));
+                return (
+                  <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 3, padding: '3px 8px', fontSize: 11 }}>
+                    <span style={{ color: 'var(--accent-green)', fontWeight: 700 }}>✓</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{a.filename}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>· {kb} KB · attached</span>
+                    <button
+                      title="Remove attachment"
+                      onClick={() => setAttachments(att => att.filter((_, idx) => idx !== i))}
+                      style={{ marginLeft: 4, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-red)', fontSize: 11, padding: 0 }}
+                    >remove</button>
+                  </span>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -641,14 +658,37 @@ export default function EmailPanel() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-header"><span className="card-title">Audience</span></div>
         <AudienceSelector audience={audience} onChange={setAudience} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12, flexWrap: 'wrap' }}>
-          <button style={smallBtn} onClick={checkAudience} disabled={busy}>Check recipients</button>
-          {audiencePreview && (
-            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-              <strong style={{ color: 'var(--accent-white)' }}>{Math.max(0, audiencePreview.total - audiencePreview.suppressed)}</strong> deliverable
-              {audiencePreview.suppressed > 0 && <span style={{ color: 'var(--text-muted)' }}> ({audiencePreview.suppressed} suppressed)</span>}
-              {audiencePreview.sample.length > 0 && <span style={{ color: 'var(--text-muted)' }}> · e.g. {audiencePreview.sample.map(s => s.username).join(', ')}</span>}
-            </span>
+
+        {/* Live recipient list — updates automatically as filters change. */}
+        <div style={{ marginTop: 14 }}>
+          {audiencePreview ? (
+            <>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                <strong style={{ color: 'var(--accent-green)' }}>{Math.max(0, audiencePreview.total - audiencePreview.suppressed)}</strong> will receive this
+                {audiencePreview.suppressed > 0 && <span style={{ color: 'var(--text-muted)' }}> · {audiencePreview.suppressed} suppressed (won't send)</span>}
+                {audiencePreview.total > audiencePreview.sample.length && <span style={{ color: 'var(--text-muted)' }}> · showing {audiencePreview.sample.length} of {audiencePreview.total}</span>}
+              </div>
+              <div style={{ maxHeight: 240, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg-primary)' }}>
+                {audiencePreview.sample.length === 0 ? (
+                  <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>No recipients match this audience.</div>
+                ) : audiencePreview.sample.map((r, i) => (
+                  <div
+                    key={r.email + i}
+                    style={{
+                      display: 'flex', justifyContent: 'space-between', gap: 12,
+                      padding: '6px 12px', fontSize: 12,
+                      borderBottom: i < audiencePreview.sample.length - 1 ? '1px solid var(--border)' : 'none',
+                      background: i % 2 ? 'transparent' : 'var(--bg-hover)',
+                    }}
+                  >
+                    <span style={{ color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.username}</span>
+                    <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.email}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Adjust the audience to see who this goes to…</span>
           )}
         </div>
       </div>
