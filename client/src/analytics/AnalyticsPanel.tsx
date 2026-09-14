@@ -65,6 +65,49 @@ const card: React.CSSProperties = {
 };
 const heading: React.CSSProperties = { color: 'var(--text-primary)', fontSize: 12, letterSpacing: '0.5px', textTransform: 'uppercase', margin: '0 0 12px' };
 
+// ─── Source display labels (presentation-only) ───────────────────────────────
+// Map raw utm_source codes to friendly names. Platforms tag inconsistently
+// (Instagram auto-appends `ig`, a manual link might say `instagram`), so we both
+// relabel AND merge rows that resolve to the same label so one source = one row.
+// Unknown codes fall through unchanged — we never invent a name for data we
+// don't recognize. Raw utm_source is untouched in storage; this is display only.
+const SOURCE_LABELS: Record<string, string> = {
+  ig: 'Instagram', instagram: 'Instagram', 'instagram.com': 'Instagram', igshopping: 'Instagram',
+  fb: 'Facebook', facebook: 'Facebook', 'facebook.com': 'Facebook',
+  google: 'Google', googleads: 'Google', adwords: 'Google',
+  tiktok: 'TikTok', tt: 'TikTok',
+  x: 'X', twitter: 'X', 't.co': 'X',
+  linkedin: 'LinkedIn', youtube: 'YouTube', yt: 'YouTube',
+  email: 'Email', newsletter: 'Email',
+  '(direct)': 'Direct',
+};
+function sourceLabel(raw: string): string {
+  const k = (raw || '').trim().toLowerCase();
+  return SOURCE_LABELS[k] || raw;
+}
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+/** Merge source rows sharing a display label (e.g. ig + instagram → Instagram), summing counts and recomputing rates. */
+function mergeSourcesByLabel(rows: SourceRow[]): Array<SourceRow & { label: string }> {
+  const byLabel = new Map<string, SourceRow & { label: string }>();
+  for (const r of rows) {
+    const label = sourceLabel(r.source);
+    const cur = byLabel.get(label);
+    if (cur) {
+      cur.sessions += r.sessions; cur.signups += r.signups; cur.aha += r.aha; cur.core += r.core; cur.premium += r.premium;
+    } else {
+      byLabel.set(label, { ...r, label });
+    }
+  }
+  return Array.from(byLabel.values())
+    .map((r) => ({
+      ...r,
+      signupRatePct: r.sessions > 0 ? round1((r.signups / r.sessions) * 100) : null,
+      premiumRatePct: r.sessions > 0 ? round1((r.premium / r.sessions) * 100) : null,
+    }))
+    .sort((a, b) => b.sessions - a.sessions);
+}
+
 // ─── Trend line chart (inline SVG, no deps, theme-aware) ──────────────────────
 
 function TrendChart({ trend }: { trend: TrendPoint[] }) {
@@ -288,9 +331,9 @@ export default function AnalyticsPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.sources.map((s) => (
-                    <tr key={s.source} style={{ borderTop: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
-                      <td style={{ padding: '4px 8px', color: 'var(--text-primary)' }}>{s.source}</td>
+                  {mergeSourcesByLabel(data.sources).map((s) => (
+                    <tr key={s.label} style={{ borderTop: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
+                      <td style={{ padding: '4px 8px', color: 'var(--text-primary)' }}>{s.label}</td>
                       <td style={{ padding: '4px 8px', textAlign: 'right' }}>{num(s.sessions)}</td>
                       <td style={{ padding: '4px 8px', textAlign: 'right' }}>{num(s.signups)}</td>
                       <td style={{ padding: '4px 8px', textAlign: 'right', color: 'var(--accent-blue)' }}>{pct(s.signupRatePct)}</td>
