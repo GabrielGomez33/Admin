@@ -12,6 +12,7 @@ import { mirrorRouter } from './routes/mirror';
 import { dinaRouter } from './routes/dina';
 import { systemRouter } from './routes/system';
 import { emailRouter } from './routes/email';
+import { analyticsRouter } from './routes/analytics';
 import { authMiddleware } from './middleware/auth';
 
 const app = express();
@@ -40,6 +41,7 @@ app.use('/admin/api/system', authMiddleware, systemRouter);
 app.use('/admin/api/mirror', authMiddleware, mirrorRouter);
 app.use('/admin/api/dina', authMiddleware, dinaRouter);
 app.use('/admin/api/email', authMiddleware, emailRouter);
+app.use('/admin/api/analytics', authMiddleware, analyticsRouter);
 
 // Start server
 app.listen(PORT, '127.0.0.1', () => {
