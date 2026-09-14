@@ -65,6 +65,49 @@ const card: React.CSSProperties = {
 };
 const heading: React.CSSProperties = { color: 'var(--text-primary)', fontSize: 12, letterSpacing: '0.5px', textTransform: 'uppercase', margin: '0 0 12px' };
 
+// ─── Source display labels (presentation-only) ───────────────────────────────
+// Map raw utm_source codes to friendly names. Platforms tag inconsistently
+// (Instagram auto-appends `ig`, a manual link might say `instagram`), so we both
+// relabel AND merge rows that resolve to the same label so one source = one row.
+// Unknown codes fall through unchanged — we never invent a name for data we
+// don't recognize. Raw utm_source is untouched in storage; this is display only.
+const SOURCE_LABELS: Record<string, string> = {
+  ig: 'Instagram', instagram: 'Instagram', 'instagram.com': 'Instagram', igshopping: 'Instagram',
+  fb: 'Facebook', facebook: 'Facebook', 'facebook.com': 'Facebook',
+  google: 'Google', googleads: 'Google', adwords: 'Google',
+  tiktok: 'TikTok', tt: 'TikTok',
+  x: 'X', twitter: 'X', 't.co': 'X',
+  linkedin: 'LinkedIn', youtube: 'YouTube', yt: 'YouTube',
+  email: 'Email', newsletter: 'Email',
+  '(direct)': 'Direct',
+};
+function sourceLabel(raw: string): string {
+  const k = (raw || '').trim().toLowerCase();
+  return SOURCE_LABELS[k] || raw;
+}
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+/** Merge source rows sharing a display label (e.g. ig + instagram → Instagram), summing counts and recomputing rates. */
+function mergeSourcesByLabel(rows: SourceRow[]): Array<SourceRow & { label: string }> {
+  const byLabel = new Map<string, SourceRow & { label: string }>();
+  for (const r of rows) {
+    const label = sourceLabel(r.source);
+    const cur = byLabel.get(label);
+    if (cur) {
+      cur.sessions += r.sessions; cur.signups += r.signups; cur.aha += r.aha; cur.core += r.core; cur.premium += r.premium;
+    } else {
+      byLabel.set(label, { ...r, label });
+    }
+  }
+  return Array.from(byLabel.values())
+    .map((r) => ({
+      ...r,
+      signupRatePct: r.sessions > 0 ? round1((r.signups / r.sessions) * 100) : null,
+      premiumRatePct: r.sessions > 0 ? round1((r.premium / r.sessions) * 100) : null,
+    }))
+    .sort((a, b) => b.sessions - a.sessions);
+}
+
 // ─── Trend line chart (inline SVG, no deps, theme-aware) ──────────────────────
 
 function TrendChart({ trend }: { trend: TrendPoint[] }) {
@@ -124,28 +167,38 @@ function TrendChart({ trend }: { trend: TrendPoint[] }) {
 function FunnelBars({ steps, entry, bump }: { steps: StepMetric[]; entry: number; bump: BiggestDrop | null }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {/* Column header so each number's meaning is explicit */}
+      <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr 66px 120px', gap: 10, alignItems: 'center', color: 'var(--text-muted)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+        <span>Stage</span>
+        <span>Sessions reaching</span>
+        <span style={{ textAlign: 'right' }}>Cum %</span>
+        <span style={{ textAlign: 'right' }}>Step · drop</span>
+      </div>
       {steps.map((s) => {
         const wpct = entry > 0 ? (s.sessionsReaching / entry) * 100 : 0;
         const isBumpTo = bump && bump.toStage === s.stage;
         return (
-          <div key={s.stage} style={{ display: 'grid', gridTemplateColumns: '150px 1fr 130px', gap: 10, alignItems: 'center' }}>
+          <div key={s.stage} style={{ display: 'grid', gridTemplateColumns: '150px 1fr 66px 120px', gap: 10, alignItems: 'center' }}>
             <span style={{ color: 'var(--text-secondary)', fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={label(s.stage)}>
               {label(s.stage)}
             </span>
-            <div style={{ background: 'var(--bg-secondary)', borderRadius: 3, height: 22, position: 'relative', border: '1px solid var(--border)' }}>
+            <div style={{ background: 'var(--bg-secondary)', borderRadius: 3, height: 22, position: 'relative', border: '1px solid var(--border)', overflow: 'hidden' }}>
               <div style={{
-                width: `${Math.max(wpct, s.sessionsReaching > 0 ? 1.5 : 0)}%`, height: '100%',
+                position: 'absolute', top: 0, left: 0,
+                width: `${Math.max(wpct, s.sessionsReaching > 0 ? 2 : 0)}%`, height: '100%',
                 background: isBumpTo ? 'var(--accent-red)' : 'var(--accent-blue)', opacity: isBumpTo ? 0.85 : 0.6,
                 borderRadius: 3, transition: 'width 0.3s',
               }} />
-              <span style={{ position: 'absolute', left: 8, top: 3, fontSize: 11, color: 'var(--text-primary)' }}>
-                {num(s.sessionsReaching)} <span style={{ color: 'var(--text-muted)' }}>({pct(s.cumulativeConversionPct)})</span>
+              {/* count sits over the track (always legible regardless of fill width) */}
+              <span style={{ position: 'absolute', left: 8, top: 0, lineHeight: '22px', fontSize: 11, color: 'var(--text-primary)', fontWeight: 600 }}>
+                {num(s.sessionsReaching)}
               </span>
             </div>
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)', textAlign: 'right' }}>{pct(s.cumulativeConversionPct)}</span>
             <span style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'right' }}>
               {s.order === 0 ? 'entry' : (
-                <>step {pct(s.stepConversionPct)}{' · '}
-                  <span style={{ color: isBumpTo ? 'var(--accent-red)' : 'var(--text-muted)' }}>−{pct(s.stepDropoffPct)}</span>
+                <>{pct(s.stepConversionPct)}{' · '}
+                  <span style={{ color: isBumpTo ? 'var(--accent-red)' : 'var(--text-muted)', fontWeight: isBumpTo ? 700 : 400 }}>−{pct(s.stepDropoffPct)}</span>
                 </>
               )}
             </span>
@@ -278,9 +331,9 @@ export default function AnalyticsPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.sources.map((s) => (
-                    <tr key={s.source} style={{ borderTop: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
-                      <td style={{ padding: '4px 8px', color: 'var(--text-primary)' }}>{s.source}</td>
+                  {mergeSourcesByLabel(data.sources).map((s) => (
+                    <tr key={s.label} style={{ borderTop: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
+                      <td style={{ padding: '4px 8px', color: 'var(--text-primary)' }}>{s.label}</td>
                       <td style={{ padding: '4px 8px', textAlign: 'right' }}>{num(s.sessions)}</td>
                       <td style={{ padding: '4px 8px', textAlign: 'right' }}>{num(s.signups)}</td>
                       <td style={{ padding: '4px 8px', textAlign: 'right', color: 'var(--accent-blue)' }}>{pct(s.signupRatePct)}</td>
