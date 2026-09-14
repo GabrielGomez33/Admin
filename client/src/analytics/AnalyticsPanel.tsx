@@ -124,28 +124,38 @@ function TrendChart({ trend }: { trend: TrendPoint[] }) {
 function FunnelBars({ steps, entry, bump }: { steps: StepMetric[]; entry: number; bump: BiggestDrop | null }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {/* Column header so each number's meaning is explicit */}
+      <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr 66px 120px', gap: 10, alignItems: 'center', color: 'var(--text-muted)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+        <span>Stage</span>
+        <span>Sessions reaching</span>
+        <span style={{ textAlign: 'right' }}>Cum %</span>
+        <span style={{ textAlign: 'right' }}>Step · drop</span>
+      </div>
       {steps.map((s) => {
         const wpct = entry > 0 ? (s.sessionsReaching / entry) * 100 : 0;
         const isBumpTo = bump && bump.toStage === s.stage;
         return (
-          <div key={s.stage} style={{ display: 'grid', gridTemplateColumns: '150px 1fr 130px', gap: 10, alignItems: 'center' }}>
+          <div key={s.stage} style={{ display: 'grid', gridTemplateColumns: '150px 1fr 66px 120px', gap: 10, alignItems: 'center' }}>
             <span style={{ color: 'var(--text-secondary)', fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={label(s.stage)}>
               {label(s.stage)}
             </span>
-            <div style={{ background: 'var(--bg-secondary)', borderRadius: 3, height: 22, position: 'relative', border: '1px solid var(--border)' }}>
+            <div style={{ background: 'var(--bg-secondary)', borderRadius: 3, height: 22, position: 'relative', border: '1px solid var(--border)', overflow: 'hidden' }}>
               <div style={{
-                width: `${Math.max(wpct, s.sessionsReaching > 0 ? 1.5 : 0)}%`, height: '100%',
+                position: 'absolute', top: 0, left: 0,
+                width: `${Math.max(wpct, s.sessionsReaching > 0 ? 2 : 0)}%`, height: '100%',
                 background: isBumpTo ? 'var(--accent-red)' : 'var(--accent-blue)', opacity: isBumpTo ? 0.85 : 0.6,
                 borderRadius: 3, transition: 'width 0.3s',
               }} />
-              <span style={{ position: 'absolute', left: 8, top: 3, fontSize: 11, color: 'var(--text-primary)' }}>
-                {num(s.sessionsReaching)} <span style={{ color: 'var(--text-muted)' }}>({pct(s.cumulativeConversionPct)})</span>
+              {/* count sits over the track (always legible regardless of fill width) */}
+              <span style={{ position: 'absolute', left: 8, top: 0, lineHeight: '22px', fontSize: 11, color: 'var(--text-primary)', fontWeight: 600 }}>
+                {num(s.sessionsReaching)}
               </span>
             </div>
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)', textAlign: 'right' }}>{pct(s.cumulativeConversionPct)}</span>
             <span style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'right' }}>
               {s.order === 0 ? 'entry' : (
-                <>step {pct(s.stepConversionPct)}{' · '}
-                  <span style={{ color: isBumpTo ? 'var(--accent-red)' : 'var(--text-muted)' }}>−{pct(s.stepDropoffPct)}</span>
+                <>{pct(s.stepConversionPct)}{' · '}
+                  <span style={{ color: isBumpTo ? 'var(--accent-red)' : 'var(--text-muted)', fontWeight: isBumpTo ? 700 : 400 }}>−{pct(s.stepDropoffPct)}</span>
                 </>
               )}
             </span>
