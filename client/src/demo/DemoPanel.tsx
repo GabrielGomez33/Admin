@@ -40,10 +40,20 @@ interface DemoAccount {
   createdBy: string | null;
   createdAt: string;
   userExists?: boolean;
+  emailVerified?: boolean;
+  premiumActive?: boolean;
+  premiumTier?: string | null;
+}
+interface DemoEmailDelivery {
+  attempted: boolean;
+  sent: boolean;
+  to?: string;
+  error?: string;
 }
 interface ProvisionedDemo extends DemoAccount {
   password: string;
   loginUrl: string;
+  emailDelivery?: DemoEmailDelivery;
 }
 
 // ─── Presentation helpers ─────────────────────────────────────────────────────
@@ -81,6 +91,19 @@ function CopyButton({ value }: { value: string }) {
   );
 }
 
+// A compact ok/bad status pill for the registry health column.
+function Chip({ ok, label: lbl, badLabel }: { ok: boolean; label: string; badLabel?: string }) {
+  return (
+    <span style={{
+      display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: 10,
+      fontFamily: 'var(--font-mono)', marginRight: 6, whiteSpace: 'nowrap',
+      border: `1px solid ${ok ? 'var(--accent-green)' : 'var(--accent-red)'}`,
+      color: ok ? 'var(--accent-green)' : 'var(--accent-red)',
+      background: ok ? 'rgba(0,255,136,0.08)' : 'rgba(255,51,85,0.08)',
+    }}>{ok ? `✓ ${lbl}` : `✗ ${badLabel || lbl}`}</span>
+  );
+}
+
 function CredRow({ label: lbl, value }: { label: string; value: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 0' }}>
@@ -98,6 +121,7 @@ export default function DemoPanel() {
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState('');
   const [label, setLabel] = useState('');
+  const [deliverTo, setDeliverTo] = useState('');
   const [provisioning, setProvisioning] = useState(false);
   const [provisionError, setProvisionError] = useState('');
   // The most recently provisioned account — credentials are shown ONCE here.
@@ -120,17 +144,21 @@ export default function DemoPanel() {
     try {
       const d = await api<{ success: boolean; data: ProvisionedDemo }>('/demo/provision', {
         method: 'POST',
-        body: JSON.stringify({ label: label.trim() || undefined }),
+        body: JSON.stringify({
+          label: label.trim() || undefined,
+          deliverTo: deliverTo.trim() || undefined,
+        }),
       });
       setJustCreated(d.data);
       setLabel('');
+      setDeliverTo('');
     } catch (e) {
       setProvisionError((e as Error).message || 'Provisioning failed');
     } finally {
       setProvisioning(false);
       refresh();
     }
-  }, [label, refresh]);
+  }, [label, deliverTo, refresh]);
 
   const revoke = useCallback(async (acct: DemoAccount) => {
     const ok = window.confirm(
@@ -174,6 +202,19 @@ export default function DemoPanel() {
             style={{
               fontFamily: 'var(--font-mono)', fontSize: 13, padding: '8px 10px',
               background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+              color: 'var(--text-primary)', borderRadius: 3, minWidth: 220, flex: 1,
+            }}
+          />
+          <input
+            type="email"
+            value={deliverTo}
+            onChange={e => setDeliverTo(e.target.value)}
+            disabled={provisioning}
+            maxLength={254}
+            placeholder="email credentials to (optional) — tester's address"
+            style={{
+              fontFamily: 'var(--font-mono)', fontSize: 13, padding: '8px 10px',
+              background: 'var(--bg-secondary)', border: '1px solid var(--border)',
               color: 'var(--text-primary)', borderRadius: 3, minWidth: 260, flex: 1,
             }}
           />
@@ -188,6 +229,10 @@ export default function DemoPanel() {
             }}
           >{provisioning ? 'Provisioning…' : 'Provision demo account'}</button>
         </div>
+        <p style={{ color: 'var(--text-muted)', fontSize: 11, margin: '8px 0 0', fontFamily: 'system-ui, sans-serif' }}>
+          Leave the email blank to just show credentials here. Enter a tester's address to also send
+          them a stylized Mirror email with their sign-in details.
+        </p>
 
         {provisionError && (
           <div style={{ color: 'var(--accent-red)', fontSize: 12, marginTop: 10, fontFamily: 'var(--font-mono)' }}>
@@ -206,6 +251,16 @@ export default function DemoPanel() {
               <CredRow label="username" value={justCreated.username} />
               <CredRow label="password" value={justCreated.password} />
             </div>
+            {justCreated.emailDelivery?.attempted && (
+              <div style={{
+                fontSize: 12, marginTop: 12, fontFamily: 'var(--font-mono)',
+                color: justCreated.emailDelivery.sent ? 'var(--accent-green)' : 'var(--accent-red)',
+              }}>
+                {justCreated.emailDelivery.sent
+                  ? `✓ Credentials emailed to ${justCreated.emailDelivery.to}`
+                  : `✗ Email not sent${justCreated.emailDelivery.error ? ` — ${justCreated.emailDelivery.error}` : ''} (credentials above are still valid)`}
+              </div>
+            )}
             <p style={{ color: 'var(--text-muted)', fontSize: 11, margin: '10px 0 0' }}>
               Shown here only — the password is never stored or logged. If you lose it, revoke
               this account and provision a new one. Premium is active immediately.
@@ -246,7 +301,7 @@ export default function DemoPanel() {
                   <th>Label</th>
                   <th>Created by</th>
                   <th>Created</th>
-                  <th>Status</th>
+                  <th>Health</th>
                   <th></th>
                 </tr>
               </thead>
@@ -258,8 +313,15 @@ export default function DemoPanel() {
                     <td style={{ color: 'var(--text-secondary)' }}>{a.label || '—'}</td>
                     <td style={{ color: 'var(--text-muted)' }}>{a.createdBy || '—'}</td>
                     <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{new Date(a.createdAt).toLocaleString()}</td>
-                    <td style={{ color: a.userExists === false ? 'var(--accent-yellow)' : 'var(--accent-green)' }}>
-                      {a.userExists === false ? 'user gone' : 'active'}
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      {a.userExists === false ? (
+                        <Chip ok={false} label="user" badLabel="user gone" />
+                      ) : (
+                        <>
+                          <Chip ok={!!a.emailVerified} label="verified" badLabel="unverified" />
+                          <Chip ok={!!a.premiumActive} label="premium" badLabel="no premium" />
+                        </>
+                      )}
                     </td>
                     <td>
                       <button
