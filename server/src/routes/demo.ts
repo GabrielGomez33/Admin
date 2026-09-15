@@ -28,8 +28,12 @@ function operator(req: Request): string {
 demoRouter.post('/provision', async (req: Request, res: Response) => {
   const rawLabel = typeof req.body?.label === 'string' ? req.body.label.trim().slice(0, 120) : '';
   const label = rawLabel || null;
+  // Optional recipient for the credential email; forwarded only when present so
+  // the default (no email) is unchanged. mirror-server does the real validation.
+  const deliverTo = typeof req.body?.deliverTo === 'string' && req.body.deliverTo.trim()
+    ? req.body.deliverTo.trim().slice(0, 254) : undefined;
   try {
-    const r = await mirrorDemoRequest('POST', '/provision', { label }, operator(req));
+    const r = await mirrorDemoRequest('POST', '/provision', { label, deliverTo }, operator(req));
     res.status(r.status).json(r.body);
   } catch (err) {
     res.status(502).json({ success: false, error: `Demo upstream unavailable: ${(err as Error).message}` });
