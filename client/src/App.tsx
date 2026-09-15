@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
 import type { CSSProperties } from 'react';
 import EmailPanel from './email/EmailPanel';
 import AnalyticsPanel from './analytics/AnalyticsPanel';
+import DemoPanel from './demo/DemoPanel';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1719,7 +1720,7 @@ function DinaPanel() {
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'system' | 'mirror' | 'dina' | 'email' | 'analytics';
+type Tab = 'system' | 'mirror' | 'dina' | 'email' | 'analytics' | 'demo';
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(!!getToken());
@@ -1750,13 +1751,13 @@ export default function App() {
         </div>
       </div>
       <div className="nav">
-        {(['system', 'mirror', 'dina', 'email', 'analytics'] as Tab[]).map(tab => (
+        {(['system', 'mirror', 'dina', 'email', 'analytics', 'demo'] as Tab[]).map(tab => (
           <button
             key={tab}
             className={`nav-tab${activeTab === tab ? ' active' : ''}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === 'system' ? 'System Overview' : tab === 'mirror' ? 'Mirror Server' : tab === 'dina' ? 'DINA Server' : tab === 'email' ? 'Email' : 'Traffic Analytics'}
+            {tab === 'system' ? 'System Overview' : tab === 'mirror' ? 'Mirror Server' : tab === 'dina' ? 'DINA Server' : tab === 'email' ? 'Email' : tab === 'analytics' ? 'Traffic Analytics' : 'Demo Accounts'}
           </button>
         ))}
       </div>
@@ -1766,6 +1767,7 @@ export default function App() {
         {activeTab === 'dina' && <DinaPanel />}
         {activeTab === 'email' && <EmailPanel />}
         {activeTab === 'analytics' && <AnalyticsPanel />}
+        {activeTab === 'demo' && <DemoPanel />}
       </div>
     </div>
   );
